@@ -1,0 +1,15 @@
+[package]
+name    = "wql-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = []
+std     = []    # re-export std::alloc; simplifies use from std contexts
+regex   = []    # enables BYTES_MATCHES; pulls in a no_std regex engine (Block 3)
+
+[dependencies]
+wql-ir = { workspace = true }
+
+[lints]
+workspace = true

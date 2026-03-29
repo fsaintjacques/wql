@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/wql-ir",
+    "crates/wql-runtime",
+    "crates/wql-compiler",
+    "crates/wql-capi",
+    "crates/wql-wasm",
+]
+
+[workspace.dependencies]
+wql-ir       = { path = "crates/wql-ir" }
+wql-runtime  = { path = "crates/wql-runtime" }
+wql-compiler = { path = "crates/wql-compiler" }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all      = "warn"
+pedantic = "warn"
+
+# WASM-optimised release profile
+[profile.release-wasm]
+inherits      = "release"
+opt-level     = "s"
+lto           = "fat"
+strip         = true
+codegen-units = 1
+panic         = "abort"

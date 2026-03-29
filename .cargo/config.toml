@@ -1,0 +1,3 @@
+# Convenience alias: `cargo wasm` builds the wql-wasm crate for wasm32
+[alias]
+wasm = "build -p wql-wasm --target wasm32-unknown-unknown --profile release-wasm"
