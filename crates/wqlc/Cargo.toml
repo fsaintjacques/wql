@@ -12,5 +12,11 @@ wql-compiler = { workspace = true }
 wql-runtime  = { workspace = true }
 wql-ir       = { workspace = true }
 
+[dev-dependencies]
+prost         = "0.13"
+prost-reflect = { version = "0.14", features = ["serde"] }
+serde_json    = "1"
+tempfile      = "3"
+
 [lints]
 workspace = true

@@ -773,6 +773,10 @@ dependencies = [
 name = "wqlc"
 version = "0.1.0"
 dependencies = [
+ "prost",
+ "prost-reflect",
+ "serde_json",
+ "tempfile",
  "wql-compiler",
  "wql-ir",
  "wql-runtime",

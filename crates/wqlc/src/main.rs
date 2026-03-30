@@ -43,12 +43,22 @@ Options (compile, eval):
   -s <schema.bin>  FileDescriptorSet for schema-bound mode
   -m <message>     Root message type (required with -s)
   -o <output>      Output file (compile only; default: stdout)
+  --delimited      Varint length-delimited stream mode (eval only)
+
+Single message mode (default):
+  Reads one protobuf message from stdin, writes one result to stdout.
+  Filter exit code: 0 = pass, 1 = filtered out.
+
+Delimited stream mode (--delimited):
+  Reads varint length-prefixed records from stdin.
+  Projections: writes length-prefixed output records.
+  Filters: writes length-prefixed records that pass.
+  Combined: writes length-prefixed projected records that pass.
 
 Examples:
   wqlc compile -q '{{ name, age }}' -o program.wql
-  wqlc compile -q '{{ name }}' -s schema.bin -m pkg.Person -o program.wql
   wqlc eval -q 'age > 18' < message.bin
-  wqlc eval -q '{{ name }}' -s schema.bin -m pkg.Person < message.bin
+  wqlc eval -q '{{ name }}' --delimited < stream.bin > filtered.bin
   wqlc inspect program.wql"
     );
     ExitCode::from(2)
@@ -93,44 +103,172 @@ fn cmd_eval(args: &[String]) -> Result<ExitCode, String> {
     let program = wql_runtime::LoadedProgram::from_bytes(&bytecode)
         .map_err(|e| format!("load error: {e}"))?;
 
+    let mode = classify_query(&query);
+
+    if opts.delimited {
+        eval_delimited(&program, mode)
+    } else {
+        eval_single(&program, mode)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum QueryMode {
+    Filter,
+    Project,
+    Combined,
+}
+
+fn classify_query(query: &str) -> QueryMode {
+    if query.contains("WHERE") && query.contains("SELECT") {
+        QueryMode::Combined
+    } else if query.contains('{') {
+        QueryMode::Project
+    } else {
+        QueryMode::Filter
+    }
+}
+
+fn eval_single(program: &wql_runtime::LoadedProgram, mode: QueryMode) -> Result<ExitCode, String> {
     let input = read_stdin()?;
 
-    let is_filter_only = !query.contains('{');
-    let is_combined = query.contains("WHERE") && query.contains("SELECT");
-
-    if is_combined {
-        let mut output = vec![0u8; input.len() * 2 + 256];
-        let result = wql_runtime::project_and_filter(&program, &input, &mut output)
-            .map_err(|e| format!("runtime error: {e}"))?;
-        match result {
-            Some(len) => {
-                io::stdout()
-                    .write_all(&output[..len])
-                    .map_err(|e| format!("write: {e}"))?;
-                Ok(ExitCode::SUCCESS)
+    match mode {
+        QueryMode::Combined => {
+            let mut output = vec![0u8; input.len() * 2 + 256];
+            let result = wql_runtime::project_and_filter(program, &input, &mut output)
+                .map_err(|e| format!("runtime error: {e}"))?;
+            match result {
+                Some(len) => {
+                    io::stdout()
+                        .write_all(&output[..len])
+                        .map_err(|e| format!("write: {e}"))?;
+                    Ok(ExitCode::SUCCESS)
+                }
+                None => Ok(ExitCode::FAILURE),
             }
-            None => {
-                // Filtered out
+        }
+        QueryMode::Filter => {
+            let result =
+                wql_runtime::filter(program, &input).map_err(|e| format!("runtime error: {e}"))?;
+            if result {
+                Ok(ExitCode::SUCCESS)
+            } else {
                 Ok(ExitCode::FAILURE)
             }
         }
-    } else if is_filter_only {
-        let result =
-            wql_runtime::filter(&program, &input).map_err(|e| format!("runtime error: {e}"))?;
-        if result {
+        QueryMode::Project => {
+            let mut output = vec![0u8; input.len() * 2 + 256];
+            let len = wql_runtime::project(program, &input, &mut output)
+                .map_err(|e| format!("runtime error: {e}"))?;
+            io::stdout()
+                .write_all(&output[..len])
+                .map_err(|e| format!("write: {e}"))?;
             Ok(ExitCode::SUCCESS)
-        } else {
-            Ok(ExitCode::FAILURE)
         }
-    } else {
-        let mut output = vec![0u8; input.len() * 2 + 256];
-        let len = wql_runtime::project(&program, &input, &mut output)
-            .map_err(|e| format!("runtime error: {e}"))?;
-        io::stdout()
-            .write_all(&output[..len])
-            .map_err(|e| format!("write: {e}"))?;
-        Ok(ExitCode::SUCCESS)
     }
+}
+
+fn eval_delimited(
+    program: &wql_runtime::LoadedProgram,
+    mode: QueryMode,
+) -> Result<ExitCode, String> {
+    let all_input = read_stdin()?;
+    let records = parse_delimited(&all_input)?;
+    let mut stdout = io::stdout().lock();
+
+    for (i, record) in records.iter().enumerate() {
+        match mode {
+            QueryMode::Project => {
+                let mut output = vec![0u8; record.len() * 2 + 256];
+                let len = wql_runtime::project(program, record, &mut output)
+                    .map_err(|e| format!("record {i}: project error: {e}"))?;
+                write_delimited_record(&mut stdout, &output[..len])
+                    .map_err(|e| format!("write: {e}"))?;
+            }
+            QueryMode::Filter => {
+                let pass = wql_runtime::filter(program, record)
+                    .map_err(|e| format!("record {i}: filter error: {e}"))?;
+                if pass {
+                    write_delimited_record(&mut stdout, record)
+                        .map_err(|e| format!("write: {e}"))?;
+                }
+            }
+            QueryMode::Combined => {
+                let mut output = vec![0u8; record.len() * 2 + 256];
+                let result = wql_runtime::project_and_filter(program, record, &mut output)
+                    .map_err(|e| format!("record {i}: runtime error: {e}"))?;
+                if let Some(len) = result {
+                    write_delimited_record(&mut stdout, &output[..len])
+                        .map_err(|e| format!("write: {e}"))?;
+                }
+            }
+        }
+    }
+
+    Ok(ExitCode::SUCCESS)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Varint length-delimited encoding
+// ═══════════════════════════════════════════════════════════════════════
+
+fn parse_delimited(mut buf: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    let mut records = Vec::new();
+    while !buf.is_empty() {
+        let (len, consumed) = decode_varint(buf).ok_or("malformed varint in delimited stream")?;
+        buf = &buf[consumed..];
+        #[allow(clippy::cast_possible_truncation)]
+        let len = len as usize;
+        if buf.len() < len {
+            return Err(format!(
+                "truncated record: expected {len} bytes, got {}",
+                buf.len()
+            ));
+        }
+        records.push(buf[..len].to_vec());
+        buf = &buf[len..];
+    }
+    Ok(records)
+}
+
+fn decode_varint(buf: &[u8]) -> Option<(u64, usize)> {
+    let mut val: u64 = 0;
+    let mut shift = 0;
+    for (i, &b) in buf.iter().enumerate() {
+        val |= u64::from(b & 0x7F) << shift;
+        if b & 0x80 == 0 {
+            return Some((val, i + 1));
+        }
+        shift += 7;
+        if shift >= 64 {
+            return None;
+        }
+    }
+    None
+}
+
+fn encode_varint(val: u64) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let mut v = val;
+    loop {
+        let mut byte = (v & 0x7F) as u8;
+        v >>= 7;
+        if v != 0 {
+            byte |= 0x80;
+        }
+        buf.push(byte);
+        if v == 0 {
+            break;
+        }
+    }
+    buf
+}
+
+fn write_delimited_record(w: &mut impl Write, record: &[u8]) -> io::Result<()> {
+    let len_bytes = encode_varint(record.len() as u64);
+    w.write_all(&len_bytes)?;
+    w.write_all(record)?;
+    Ok(())
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -255,6 +393,7 @@ struct Opts {
     schema_bytes: Option<Vec<u8>>,
     message: Option<String>,
     output: Option<String>,
+    delimited: bool,
 }
 
 fn parse_common_opts(args: &[String]) -> Result<Opts, String> {
@@ -262,6 +401,7 @@ fn parse_common_opts(args: &[String]) -> Result<Opts, String> {
     let mut schema_path = None;
     let mut message = None;
     let mut output = None;
+    let mut delimited = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -282,6 +422,7 @@ fn parse_common_opts(args: &[String]) -> Result<Opts, String> {
                 i += 1;
                 output = Some(args.get(i).ok_or("missing value for -o")?.clone());
             }
+            "--delimited" => delimited = true,
             other => return Err(format!("unknown option '{other}'")),
         }
         i += 1;
@@ -296,6 +437,7 @@ fn parse_common_opts(args: &[String]) -> Result<Opts, String> {
         schema_bytes,
         message,
         output,
+        delimited,
     })
 }
 
