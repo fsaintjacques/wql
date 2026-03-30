@@ -52,20 +52,27 @@ impl LoadedProgram {
 /// Project `input` through `program`, writing selected fields to `output`.
 ///
 /// Returns the number of bytes written to `output`.
-/// `output` must be at least as large as `input`.
+/// `output` must be at least `input.len() + 5 * max_frame_depth` bytes to
+/// accommodate the temporary gap used when rewriting length prefixes in
+/// nested sub-messages.
 ///
 /// # Errors
-/// Returns `RuntimeError::OutputBufferTooSmall` if `output` is shorter than
-/// `input`, or `RuntimeError::MalformedInput` if the input is not valid protobuf.
+/// Returns `RuntimeError::OutputBufferTooSmall` if `output` is too small,
+/// or `RuntimeError::MalformedInput` if the input is not valid protobuf.
 pub fn project(
     program: &LoadedProgram,
     input: &[u8],
     output: &mut [u8],
 ) -> Result<usize, RuntimeError> {
-    if output.len() < input.len() {
+    let required = input.len() + 5 * usize::from(program.header.max_frame_depth);
+    if output.len() < required {
         return Err(RuntimeError::OutputBufferTooSmall);
     }
-    let mut vm = Vm::new(&program.instructions, &program.label_table);
+    let mut vm = Vm::new(
+        &program.instructions,
+        &program.label_table,
+        program.header.max_frame_depth,
+    );
     let (_, written) = vm.execute(0, input, output, 0)?;
     Ok(written)
 }
