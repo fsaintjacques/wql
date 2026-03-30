@@ -770,6 +770,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wqlc"
+version = "0.1.0"
+dependencies = [
+ "wql-compiler",
+ "wql-ir",
+ "wql-runtime",
+]
+
+[[package]]
 name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"

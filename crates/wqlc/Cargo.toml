@@ -1,0 +1,16 @@
+[package]
+name    = "wqlc"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "wqlc"
+path = "src/main.rs"
+
+[dependencies]
+wql-compiler = { workspace = true }
+wql-runtime  = { workspace = true }
+wql-ir       = { workspace = true }
+
+[lints]
+workspace = true

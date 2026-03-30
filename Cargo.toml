@@ -6,6 +6,7 @@ members = [
     "crates/wql-compiler",
     "crates/wql-capi",
     "crates/wql-wasm",
+    "crates/wqlc",
 ]
 
 [workspace.dependencies]
