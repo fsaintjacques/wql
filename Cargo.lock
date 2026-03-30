@@ -732,6 +732,10 @@ name = "wql-capi"
 version = "0.1.0"
 dependencies = [
  "cbindgen",
+ "prost",
+ "prost-reflect",
+ "serde_json",
+ "tempfile",
  "wql-compiler",
  "wql-runtime",
 ]
