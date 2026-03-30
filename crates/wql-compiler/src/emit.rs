@@ -221,9 +221,19 @@ fn insert_field_decode(
     emitter: &mut Emitter,
     map: &mut HashMap<Vec<u32>, FieldDecodeInfo>,
 ) -> Result<(), CompileError> {
-    if !map.contains_key(&field.segments) {
+    let encoding = field.encoding.unwrap_or(Encoding::Varint);
+    if let Some(existing) = map.get(&field.segments) {
+        if existing.encoding != encoding {
+            let path_str = field
+                .segments
+                .iter()
+                .map(|s| format!("#{s}"))
+                .collect::<Vec<_>>()
+                .join(".");
+            return Err(CompileError::ConflictingEncoding { field: path_str });
+        }
+    } else {
         let reg = emitter.alloc_register()?;
-        let encoding = field.encoding.unwrap_or(Encoding::Varint);
         map.insert(
             field.segments.clone(),
             FieldDecodeInfo {
@@ -371,25 +381,25 @@ fn emit_predicate_logic(
     emitter: &mut Emitter,
     pred: &BoundPredicate,
     field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
-) {
+) -> Result<(), CompileError> {
     match &pred.kind {
         BoundPredicateKind::And(l, r) => {
-            emit_predicate_logic(emitter, l, field_map);
-            emit_predicate_logic(emitter, r, field_map);
+            emit_predicate_logic(emitter, l, field_map)?;
+            emit_predicate_logic(emitter, r, field_map)?;
             emitter.push(Instruction::And);
         }
         BoundPredicateKind::Or(l, r) => {
-            emit_predicate_logic(emitter, l, field_map);
-            emit_predicate_logic(emitter, r, field_map);
+            emit_predicate_logic(emitter, l, field_map)?;
+            emit_predicate_logic(emitter, r, field_map)?;
             emitter.push(Instruction::Or);
         }
         BoundPredicateKind::Not(inner) => {
-            emit_predicate_logic(emitter, inner, field_map);
+            emit_predicate_logic(emitter, inner, field_map)?;
             emitter.push(Instruction::Not);
         }
         BoundPredicateKind::Comparison { field, op, value } => {
             let reg = field_map[&field.segments].reg;
-            emit_comparison(emitter, reg, *op, value);
+            emit_comparison(emitter, reg, *op, value)?;
         }
         BoundPredicateKind::Presence(field) => {
             let reg = field_map[&field.segments].reg;
@@ -427,18 +437,20 @@ fn emit_predicate_logic(
                         pattern: bytes,
                     });
                     #[cfg(not(feature = "regex"))]
-                    {
-                        let _ = reg;
-                        // This path should be unreachable if the feature is off,
-                        // but we handle it defensively.
-                    }
+                    return Err(CompileError::RegexNotEnabled);
                 }
             }
         }
     }
+    Ok(())
 }
 
-fn emit_comparison(emitter: &mut Emitter, reg: u8, op: CompareOp, value: &Literal) {
+fn emit_comparison(
+    emitter: &mut Emitter,
+    reg: u8,
+    op: CompareOp,
+    value: &Literal,
+) -> Result<(), CompileError> {
     match value {
         Literal::Int(n, _) => {
             let imm = *n;
@@ -456,7 +468,12 @@ fn emit_comparison(emitter: &mut Emitter, reg: u8, op: CompareOp, value: &Litera
             match op {
                 CompareOp::Eq => emitter.push(Instruction::CmpEq { reg, imm }),
                 CompareOp::Neq => emitter.push(Instruction::CmpNeq { reg, imm }),
-                _ => {} // bool comparisons other than eq/neq don't make sense, but handle gracefully
+                _ => {
+                    return Err(CompileError::UnsupportedComparison {
+                        op: compare_op_name(op),
+                        literal_type: "bool",
+                    })
+                }
             }
         }
         Literal::String(s, _) => {
@@ -467,9 +484,26 @@ fn emit_comparison(emitter: &mut Emitter, reg: u8, op: CompareOp, value: &Litera
                     emitter.push(Instruction::CmpLenEq { reg, bytes });
                     emitter.push(Instruction::Not);
                 }
-                _ => {} // string < > don't make sense, handle gracefully
+                _ => {
+                    return Err(CompileError::UnsupportedComparison {
+                        op: compare_op_name(op),
+                        literal_type: "string",
+                    })
+                }
             }
         }
+    }
+    Ok(())
+}
+
+fn compare_op_name(op: CompareOp) -> &'static str {
+    match op {
+        CompareOp::Eq => "==",
+        CompareOp::Neq => "!=",
+        CompareOp::Lt => "<",
+        CompareOp::Lte => "<=",
+        CompareOp::Gt => ">",
+        CompareOp::Gte => ">=",
     }
 }
 
@@ -488,7 +522,7 @@ fn emit_predicate_program(
         arms,
     });
 
-    emit_predicate_logic(emitter, pred, &field_map);
+    emit_predicate_logic(emitter, pred, &field_map)?;
     emitter.push(Instruction::Return);
 
     emit_nested_predicate_dispatches(emitter, deferred);
@@ -509,6 +543,17 @@ fn emit_combined(
     let mut field_map = HashMap::new();
     collect_predicate_fields(pred, emitter, &mut field_map)?;
 
+    // For DeepCopy, allocate the self-label BEFORE build_combined_dispatch
+    // so that label indices are assigned in emission order.
+    let deep_copy_label = match &proj.kind {
+        BoundProjectionKind::DeepCopy { .. } => {
+            let label = emitter.alloc_label();
+            emitter.push(Instruction::Label);
+            Some(label)
+        }
+        BoundProjectionKind::Inclusion { .. } => None,
+    };
+
     // Build the merged DISPATCH: combine projection arms with predicate decode arms
     let (merged_arms, proj_deferred, pred_deferred) =
         build_combined_dispatch(proj, &field_map, emitter);
@@ -522,8 +567,6 @@ fn emit_combined(
                 .iter()
                 .any(|i| matches!(i, BoundProjectionItem::DeepSearch(_)));
             if has_deep_search {
-                // For combined + deep search, we'd need a self_label, but combined form
-                // with deep search is an edge case. Use Skip for now.
                 DefaultAction::Skip
             } else if *preserve_unknowns {
                 DefaultAction::Copy
@@ -532,10 +575,7 @@ fn emit_combined(
             }
         }
         BoundProjectionKind::DeepCopy { .. } => {
-            // Deep copy combined with predicate: use Recurse
-            let self_label = emitter.alloc_label();
-            emitter.push(Instruction::Label);
-            DefaultAction::Recurse(self_label)
+            DefaultAction::Recurse(deep_copy_label.expect("allocated above"))
         }
     };
 
@@ -544,7 +584,7 @@ fn emit_combined(
         arms: merged_arms,
     });
 
-    emit_predicate_logic(emitter, pred, &field_map);
+    emit_predicate_logic(emitter, pred, &field_map)?;
     emitter.push(Instruction::Return);
 
     // Emit deferred nested sub-programs for projection
@@ -608,6 +648,10 @@ fn build_combined_dispatch<'a>(
     }
 
     // Add predicate decode arms
+    // Track which Frame label index maps to which pred_deferred entry,
+    // so we can merge nested predicate decodes into existing projection Frames.
+    let mut frame_label_to_deferred: HashMap<u32, usize> = HashMap::new();
+
     for info in field_map.values() {
         if info.path.len() == 1 {
             let field_num = info.path[0];
@@ -624,17 +668,39 @@ fn build_combined_dispatch<'a>(
             // Multi-segment: need Frame
             let field_num = info.path[0];
             let actions = arms_map.entry(field_num).or_default();
-            if !actions.iter().any(|a| matches!(a, ArmAction::Frame(_))) {
+            let nested_field = NestedFieldInfo {
+                remaining_path: info.path[1..].to_vec(),
+                reg: info.reg,
+                encoding: info.encoding,
+            };
+
+            // Check if a Frame already exists (from projection)
+            let existing_frame_label = actions.iter().find_map(|a| match a {
+                ArmAction::Frame(label) => Some(*label),
+                _ => None,
+            });
+
+            if let Some(label) = existing_frame_label {
+                // Merge into the existing Frame's deferred nested fields
+                if let Some(&deferred_idx) = frame_label_to_deferred.get(&label) {
+                    pred_deferred[deferred_idx].fields.push(nested_field);
+                } else {
+                    // First predicate field for this existing projection Frame —
+                    // create a new deferred entry and track it.
+                    let idx = pred_deferred.len();
+                    pred_deferred.push(DeferredPredicateNested {
+                        fields: vec![nested_field],
+                    });
+                    frame_label_to_deferred.insert(label, idx);
+                }
+            } else {
                 let label = emitter.alloc_label();
                 actions.push(ArmAction::Frame(label));
-                let nested_infos = vec![NestedFieldInfo {
-                    remaining_path: info.path[1..].to_vec(),
-                    reg: info.reg,
-                    encoding: info.encoding,
-                }];
+                let idx = pred_deferred.len();
                 pred_deferred.push(DeferredPredicateNested {
-                    fields: nested_infos,
+                    fields: vec![nested_field],
                 });
+                frame_label_to_deferred.insert(label, idx);
             }
         }
     }

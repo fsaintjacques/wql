@@ -79,6 +79,18 @@ pub enum CompileError {
 
     /// Failed to decode the `FileDescriptorSet` bytes.
     InvalidSchema(String),
+
+    /// Unsupported comparison (e.g. ordering on bool/string).
+    UnsupportedComparison {
+        op: &'static str,
+        literal_type: &'static str,
+    },
+
+    /// `matches` predicate requires the `regex` feature.
+    RegexNotEnabled,
+
+    /// Same field path used with conflicting encodings.
+    ConflictingEncoding { field: String },
 }
 
 impl From<ParseError> for CompileError {
@@ -128,6 +140,15 @@ impl std::fmt::Display for CompileError {
             }
             Self::TooManyRegisters => write!(f, "program requires more than 16 registers"),
             Self::InvalidSchema(msg) => write!(f, "invalid schema: {msg}"),
+            Self::UnsupportedComparison { op, literal_type } => {
+                write!(f, "unsupported comparison: {op} on {literal_type}")
+            }
+            Self::RegexNotEnabled => {
+                write!(f, "matches predicate requires the regex feature")
+            }
+            Self::ConflictingEncoding { field } => {
+                write!(f, "field '{field}' used with conflicting encodings")
+            }
         }
     }
 }
