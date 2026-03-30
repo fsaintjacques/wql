@@ -24,8 +24,6 @@ pub enum ParseErrorKind {
     },
     /// Unexpected end of input.
     UnexpectedEof,
-    /// `...` (ellipsis) must be the last element in a projection body.
-    EllipsisNotLast,
 }
 
 impl std::fmt::Display for ParseError {
@@ -40,9 +38,6 @@ impl std::fmt::Display for ParseError {
                 write!(f, "expected {expected}, found {found}")
             }
             ParseErrorKind::UnexpectedEof => write!(f, "unexpected end of input"),
-            ParseErrorKind::EllipsisNotLast => {
-                write!(f, "'...' must be the last element in a projection")
-            }
         }
     }
 }

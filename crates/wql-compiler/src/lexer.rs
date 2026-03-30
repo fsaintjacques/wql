@@ -420,9 +420,11 @@ impl<'a> Lexer<'a> {
                     }
                     self.pos += 1;
                 }
-                other => {
-                    value.push(char::from(other));
-                    self.pos += 1;
+                _ => {
+                    // Decode a full UTF-8 character from the source slice.
+                    let ch = self.source[self.pos..].chars().next().expect("non-empty");
+                    value.push(ch);
+                    self.pos += ch.len_utf8();
                 }
             }
         }
@@ -739,5 +741,12 @@ mod tests {
     fn lex_string_null_escape() {
         let kinds = lex_kinds(r#""\0""#).unwrap();
         assert_eq!(kinds, vec![TokenKind::StringLit("\0".into())]);
+    }
+
+    #[test]
+    fn lex_string_utf8() {
+        // Multi-byte UTF-8: é = [0xC3, 0xA9], 日 = [0xE6, 0x97, 0xA5]
+        let kinds = lex_kinds(r#""café 日本""#).unwrap();
+        assert_eq!(kinds, vec![TokenKind::StringLit("café 日本".into())]);
     }
 }
