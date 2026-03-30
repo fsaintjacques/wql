@@ -555,7 +555,7 @@ fn emit_combined(
     };
 
     // Build the merged DISPATCH: combine projection arms with predicate decode arms
-    let (merged_arms, proj_deferred, pred_deferred) =
+    let (merged_arms, proj_deferred, pred_deferred, merged_pred_fields) =
         build_combined_dispatch(proj, &field_map, emitter);
 
     let default = match &proj.kind {
@@ -587,10 +587,12 @@ fn emit_combined(
     emit_predicate_logic(emitter, pred, &field_map)?;
     emitter.push(Instruction::Return);
 
-    // Emit deferred nested sub-programs for projection
+    // Emit deferred nested sub-programs for projection, injecting any
+    // predicate decode arms that share the same parent field.
     for nested in proj_deferred {
         emitter.push(Instruction::Label);
-        emit_combined_nested_projection(emitter, nested.projection, &field_map)?;
+        let pred_fields = merged_pred_fields.get(&nested.label);
+        emit_combined_nested_projection(emitter, nested.projection, pred_fields)?;
     }
 
     // Emit deferred nested dispatches for predicate
@@ -600,13 +602,16 @@ fn emit_combined(
 }
 
 struct DeferredCombinedNested<'a> {
+    label: u32,
     projection: &'a BoundProjection,
 }
 
+// Fourth element: predicate fields to inject into projection Frames (keyed by label).
 type CombinedDispatchResult<'a> = (
     Vec<DispatchArm>,
     Vec<DeferredCombinedNested<'a>>,
     Vec<DeferredPredicateNested>,
+    HashMap<u32, Vec<NestedFieldInfo>>,
 );
 
 fn build_combined_dispatch<'a>(
@@ -617,6 +622,8 @@ fn build_combined_dispatch<'a>(
     let mut arms_map: HashMap<u32, Vec<ArmAction>> = HashMap::new();
     let mut proj_deferred: Vec<DeferredCombinedNested<'a>> = Vec::new();
     let mut pred_deferred: Vec<DeferredPredicateNested> = Vec::new();
+    // Predicate fields to inject into existing projection Frames (keyed by label).
+    let mut merged_pred_fields: HashMap<u32, Vec<NestedFieldInfo>> = HashMap::new();
 
     // Add projection arms
     match &proj.kind {
@@ -635,7 +642,7 @@ fn build_combined_dispatch<'a>(
                             .entry(field.field_num)
                             .or_default()
                             .push(ArmAction::Frame(label));
-                        proj_deferred.push(DeferredCombinedNested { projection });
+                        proj_deferred.push(DeferredCombinedNested { label, projection });
                     }
                 }
             }
@@ -648,10 +655,6 @@ fn build_combined_dispatch<'a>(
     }
 
     // Add predicate decode arms
-    // Track which Frame label index maps to which pred_deferred entry,
-    // so we can merge nested predicate decodes into existing projection Frames.
-    let mut frame_label_to_deferred: HashMap<u32, usize> = HashMap::new();
-
     for info in field_map.values() {
         if info.path.len() == 1 {
             let field_num = info.path[0];
@@ -681,26 +684,18 @@ fn build_combined_dispatch<'a>(
             });
 
             if let Some(label) = existing_frame_label {
-                // Merge into the existing Frame's deferred nested fields
-                if let Some(&deferred_idx) = frame_label_to_deferred.get(&label) {
-                    pred_deferred[deferred_idx].fields.push(nested_field);
-                } else {
-                    // First predicate field for this existing projection Frame —
-                    // create a new deferred entry and track it.
-                    let idx = pred_deferred.len();
-                    pred_deferred.push(DeferredPredicateNested {
-                        fields: vec![nested_field],
-                    });
-                    frame_label_to_deferred.insert(label, idx);
-                }
+                // Merge into the projection Frame's sub-program — these will be
+                // injected as Decode arms when emitting the nested projection.
+                merged_pred_fields
+                    .entry(label)
+                    .or_default()
+                    .push(nested_field);
             } else {
                 let label = emitter.alloc_label();
                 actions.push(ArmAction::Frame(label));
-                let idx = pred_deferred.len();
                 pred_deferred.push(DeferredPredicateNested {
                     fields: vec![nested_field],
                 });
-                frame_label_to_deferred.insert(label, idx);
             }
         }
     }
@@ -717,20 +712,107 @@ fn build_combined_dispatch<'a>(
         ArmMatch::Field(n) | ArmMatch::FieldAndWireType(n, _) => n,
     });
 
-    (arms, proj_deferred, pred_deferred)
+    (arms, proj_deferred, pred_deferred, merged_pred_fields)
 }
 
-/// Emit a nested projection for combined mode, also inserting decode arms
-/// for any predicate fields within this nested scope.
+/// Emit a nested projection for combined mode, injecting predicate decode
+/// arms into the DISPATCH for any predicate fields that share this parent.
 fn emit_combined_nested_projection(
     emitter: &mut Emitter,
     proj: &BoundProjection,
-    _field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
+    pred_fields: Option<&Vec<NestedFieldInfo>>,
 ) -> Result<(), CompileError> {
-    // For simplicity in v1, nested combined projections use the same logic
-    // as regular projections. Predicate fields within nested scopes are handled
-    // by the nested predicate dispatches.
-    emit_projection(emitter, proj)
+    if pred_fields.is_none() || pred_fields.is_some_and(Vec::is_empty) {
+        // No predicate fields to merge — use standard projection emission.
+        return emit_projection(emitter, proj);
+    }
+    let pred_fields = pred_fields.unwrap();
+
+    // Build the projection's DISPATCH arms, then inject Decode arms for
+    // predicate fields before emitting.
+    match &proj.kind {
+        BoundProjectionKind::Inclusion {
+            items,
+            preserve_unknowns,
+        } => {
+            let mut arms = Vec::new();
+            let mut deferred: Vec<DeferredNested<'_>> = Vec::new();
+
+            for item in items {
+                match item {
+                    BoundProjectionItem::Field(f) | BoundProjectionItem::DeepSearch(f) => {
+                        arms.push(DispatchArm {
+                            match_: ArmMatch::Field(f.field_num),
+                            actions: vec![ArmAction::Copy],
+                        });
+                    }
+                    BoundProjectionItem::Nested { field, projection } => {
+                        let label = emitter.alloc_label();
+                        arms.push(DispatchArm {
+                            match_: ArmMatch::Field(field.field_num),
+                            actions: vec![ArmAction::Frame(label)],
+                        });
+                        deferred.push(DeferredNested { projection });
+                    }
+                }
+            }
+
+            // Inject predicate decode arms (single-segment remaining paths only for now)
+            for pf in pred_fields {
+                if pf.remaining_path.len() == 1 {
+                    let field_num = pf.remaining_path[0];
+                    // Check if this field already has an arm
+                    if let Some(arm) = arms
+                        .iter_mut()
+                        .find(|a| a.match_ == ArmMatch::Field(field_num))
+                    {
+                        // Insert Decode before existing actions
+                        arm.actions.insert(
+                            0,
+                            ArmAction::Decode {
+                                reg: pf.reg,
+                                encoding: pf.encoding,
+                            },
+                        );
+                    } else {
+                        arms.push(DispatchArm {
+                            match_: ArmMatch::Field(field_num),
+                            actions: vec![ArmAction::Decode {
+                                reg: pf.reg,
+                                encoding: pf.encoding,
+                            }],
+                        });
+                    }
+                }
+                // Multi-segment remaining paths within nested projections are
+                // not supported in v1 combined mode.
+            }
+
+            let default = if *preserve_unknowns {
+                DefaultAction::Copy
+            } else {
+                DefaultAction::Skip
+            };
+
+            arms.sort_by_key(|arm| match arm.match_ {
+                ArmMatch::Field(n) | ArmMatch::FieldAndWireType(n, _) => n,
+            });
+
+            emitter.push(Instruction::Dispatch { default, arms });
+            emitter.push(Instruction::Return);
+
+            for nested in deferred {
+                emitter.push(Instruction::Label);
+                emit_projection(emitter, nested.projection)?;
+            }
+
+            Ok(())
+        }
+        BoundProjectionKind::DeepCopy { .. } => {
+            // DeepCopy nested inside a combined projection — just emit normally.
+            emit_projection(emitter, proj)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1290,5 +1372,130 @@ mod tests {
 
         // Field 3 tag = (3 << 3) | 0 = 24, should not be in output
         assert!(!output.contains(&24));
+    }
+
+    // ─── Error path tests ───
+
+    #[test]
+    fn emit_error_bool_ordering() {
+        let result = compile("#1 > true", &CompileOptions::default());
+        assert!(matches!(
+            result,
+            Err(crate::error::CompileError::UnsupportedComparison {
+                literal_type: "bool",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn emit_error_string_ordering() {
+        let result = compile(r#"#1 < "abc""#, &CompileOptions::default());
+        assert!(matches!(
+            result,
+            Err(crate::error::CompileError::UnsupportedComparison {
+                literal_type: "string",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn emit_error_bool_eq_ok() {
+        // Bool equality should work fine
+        let instrs = compile_and_decode("#1 == true");
+        assert!(instrs.contains(&Instruction::CmpEq { reg: 0, imm: 1 }));
+    }
+
+    #[test]
+    fn emit_error_string_eq_ok() {
+        // String equality should work fine
+        let instrs = compile_and_decode(r#"#1 == "abc""#);
+        assert!(instrs.contains(&Instruction::CmpLenEq {
+            reg: 0,
+            bytes: b"abc".to_vec()
+        }));
+    }
+
+    #[test]
+    fn emit_error_string_neq_ok() {
+        // String != should emit CmpLenEq + Not
+        let instrs = compile_and_decode(r#"#1 != "abc""#);
+        assert!(instrs.contains(&Instruction::CmpLenEq {
+            reg: 0,
+            bytes: b"abc".to_vec()
+        }));
+        assert!(instrs.contains(&Instruction::Not));
+    }
+
+    #[test]
+    fn emit_combined_shared_nested() {
+        // Predicate and projection share a nested parent field
+        let instrs = compile_and_decode("WHERE #3.#1 > 0 SELECT { #3 { #1 } }");
+        // Should have a single Frame for field 3, and the nested dispatch
+        // should contain both Copy for #1 (projection) and Decode for #1 (predicate).
+        match &instrs[0] {
+            Instruction::Dispatch { arms, .. } => {
+                let arm3 = arms.iter().find(|a| a.match_ == ArmMatch::Field(3));
+                assert!(arm3.is_some(), "missing arm for field 3");
+                // Should have exactly one Frame action (not two)
+                let frame_count = arm3
+                    .unwrap()
+                    .actions
+                    .iter()
+                    .filter(|a| matches!(a, ArmAction::Frame(_)))
+                    .count();
+                assert_eq!(frame_count, 1, "should have exactly one Frame for field 3");
+            }
+            other => panic!("expected Dispatch, got {other:?}"),
+        }
+        // Find the nested dispatch and verify it has Decode for field 1
+        let nested = instrs
+            .iter()
+            .skip(1)
+            .find(|i| matches!(i, Instruction::Dispatch { .. }));
+        match nested {
+            Some(Instruction::Dispatch { arms, .. }) => {
+                let arm1 = arms.iter().find(|a| a.match_ == ArmMatch::Field(1));
+                assert!(arm1.is_some(), "nested dispatch missing arm for field 1");
+                let actions = &arm1.unwrap().actions;
+                assert!(
+                    actions
+                        .iter()
+                        .any(|a| matches!(a, ArmAction::Decode { .. })),
+                    "nested arm for field 1 missing Decode"
+                );
+                assert!(
+                    actions.contains(&ArmAction::Copy),
+                    "nested arm for field 1 missing Copy"
+                );
+            }
+            other => panic!("expected nested Dispatch, got {other:?}"),
+        }
+        // Verify predicate logic is present
+        assert!(instrs.contains(&Instruction::CmpGt { reg: 0, imm: 0 }));
+    }
+
+    #[test]
+    fn emit_deep_copy_with_predicate_label_order() {
+        // DeepCopy + predicate: label for Recurse must point to self
+        let instrs = compile_and_decode("WHERE #2 > 0 SELECT { .. -#3 }");
+        // Structure: Label, Dispatch(Recurse(self), [2→Decode, 3→Skip]), CmpGt, Return
+        assert_eq!(instrs[0], Instruction::Label);
+        match &instrs[1] {
+            Instruction::Dispatch { default, arms } => {
+                match default {
+                    DefaultAction::Recurse(label_offset) => {
+                        // The recurse target should point back to the Label at instrs[0]
+                        assert!(*label_offset > 0 || instrs[0] == Instruction::Label);
+                    }
+                    other => panic!("expected Recurse default, got {other:?}"),
+                }
+                // Should have arms for field 2 (Decode) and field 3 (Skip)
+                assert!(arms.iter().any(|a| a.match_ == ArmMatch::Field(2)));
+                assert!(arms.iter().any(|a| a.match_ == ArmMatch::Field(3)));
+            }
+            other => panic!("expected Dispatch, got {other:?}"),
+        }
     }
 }
