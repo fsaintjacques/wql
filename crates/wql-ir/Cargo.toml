@@ -7,6 +7,7 @@ edition = "2021"
 default = ["alloc"]
 alloc   = []         # enables encode (Vec<u8> output); always on except in
                      # hypothetical bare-metal embeddings
+regex   = []         # enables BYTES_MATCHES instruction variant
 serde   = ["dep:serde"]
 
 [dependencies]

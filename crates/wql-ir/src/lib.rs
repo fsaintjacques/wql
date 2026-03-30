@@ -1,6 +1,11 @@
 #![no_std]
 
-#[cfg(feature = "alloc")]
 extern crate alloc;
 
-// Types defined in subsequent blocks.
+pub mod codec;
+pub mod types;
+
+pub use codec::DecodeError;
+#[cfg(feature = "alloc")]
+pub use codec::{decode, encode, InstructionIter};
+pub use types::*;
