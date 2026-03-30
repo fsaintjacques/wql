@@ -1,8 +1,5 @@
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap
-)]
+// Zigzag encode/decode intentionally reinterprets sign bits.
+#![allow(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
 
 pub use crate::types::Program;
 #[cfg(feature = "regex")]
@@ -12,7 +9,6 @@ use crate::types::{
     WireType, HEADER_SIZE, MAGIC, VERSION,
 };
 
-#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -42,6 +38,10 @@ pub enum DecodeError {
     RegisterOutOfRange(u8),
     /// `BYTES_MATCHES` encountered but `regex` feature is not enabled.
     RegexNotSupported,
+    /// A varint encoding is malformed (too many continuation bytes).
+    MalformedVarint,
+    /// A varint value overflows the target type (e.g. u64 → u32/usize).
+    Overflow,
 }
 
 impl core::fmt::Display for DecodeError {
@@ -59,6 +59,8 @@ impl core::fmt::Display for DecodeError {
             Self::EmptyArmActions => write!(f, "DISPATCH arm has zero actions"),
             Self::RegisterOutOfRange(r) => write!(f, "register {r} out of range (max 15)"),
             Self::RegexNotSupported => write!(f, "BYTES_MATCHES requires regex feature"),
+            Self::MalformedVarint => write!(f, "malformed varint encoding"),
+            Self::Overflow => write!(f, "varint value overflows target type"),
         }
     }
 }
@@ -167,7 +169,7 @@ impl<'a> Reader<'a> {
             }
             shift += 7;
             if shift >= 64 {
-                return Err(DecodeError::UnexpectedEof);
+                return Err(DecodeError::MalformedVarint);
             }
         }
     }
@@ -176,9 +178,25 @@ impl<'a> Reader<'a> {
         self.read_uvarint().map(zigzag_decode)
     }
 
-    #[cfg(feature = "alloc")]
+    /// Read a uvarint and convert to usize, rejecting overflow.
+    fn read_uvarint_as_usize(&mut self) -> Result<usize, DecodeError> {
+        let v = self.read_uvarint()?;
+        usize::try_from(v).map_err(|_| DecodeError::Overflow)
+    }
+
+    /// Read a uvarint and convert to u32, rejecting overflow.
+    fn read_uvarint_as_u32(&mut self) -> Result<u32, DecodeError> {
+        let v = self.read_uvarint()?;
+        u32::try_from(v).map_err(|_| DecodeError::Overflow)
+    }
+
+    /// Remaining bytes in the buffer from current position.
+    fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
+    }
+
     fn read_bytes_vec(&mut self) -> Result<Vec<u8>, DecodeError> {
-        let len = self.read_uvarint()? as usize;
+        let len = self.read_uvarint_as_usize()?;
         if self.pos + len > self.buf.len() {
             return Err(DecodeError::UnexpectedEof);
         }
@@ -188,7 +206,7 @@ impl<'a> Reader<'a> {
     }
 
     fn skip_bytes(&mut self) -> Result<(), DecodeError> {
-        let len = self.read_uvarint()? as usize;
+        let len = self.read_uvarint_as_usize()?;
         if self.pos + len > self.buf.len() {
             return Err(DecodeError::UnexpectedEof);
         }
@@ -199,12 +217,10 @@ impl<'a> Reader<'a> {
 
 // ───────────────────────── Writer
 
-#[cfg(feature = "alloc")]
 struct Writer {
     buf: Vec<u8>,
 }
 
-#[cfg(feature = "alloc")]
 impl Writer {
     fn new() -> Self {
         Self { buf: Vec::new() }
@@ -269,14 +285,12 @@ const OP_RETURN: u8 = 0x15;
 // Encode
 // ═══════════════════════════════════════════════════════════════════════
 
-#[cfg(feature = "alloc")]
 fn check_reg(reg: u8) {
     debug_assert!(reg < 16, "register index {reg} out of range (max 15)");
 }
 
 /// Compute the byte size of an encoded instruction, given current label offsets.
 /// `label_offsets` may be empty on the first iteration of label resolution.
-#[cfg(feature = "alloc")]
 fn instruction_size(instr: &Instruction, label_offsets: &[u32]) -> usize {
     fn resolve(label_offsets: &[u32], idx: u32) -> u64 {
         label_offsets.get(idx as usize).copied().unwrap_or(0).into()
@@ -351,7 +365,7 @@ fn instruction_size(instr: &Instruction, label_offsets: &[u32]) -> usize {
 }
 
 /// Iteratively resolve label indices to absolute bytecode byte offsets.
-#[cfg(feature = "alloc")]
+#[allow(clippy::cast_possible_truncation)] // bytecode << 4 GB
 fn resolve_label_offsets(instructions: &[Instruction]) -> Vec<u32> {
     let mut offsets: Vec<u32> = Vec::new();
     loop {
@@ -370,7 +384,6 @@ fn resolve_label_offsets(instructions: &[Instruction]) -> Vec<u32> {
     }
 }
 
-#[cfg(feature = "alloc")]
 #[allow(clippy::too_many_lines)]
 fn encode_instruction(w: &mut Writer, instr: &Instruction, label_offsets: &[u32]) {
     fn resolve(label_offsets: &[u32], idx: u32) -> u64 {
@@ -524,7 +537,6 @@ fn encode_instruction(w: &mut Writer, instr: &Instruction, label_offsets: &[u32]
     }
 }
 
-#[cfg(feature = "alloc")]
 fn compute_register_count(instructions: &[Instruction]) -> u8 {
     let mut max_reg: Option<u8> = None;
     let mut update = |r: u8| {
@@ -567,17 +579,28 @@ fn compute_register_count(instructions: &[Instruction]) -> u8 {
     max_reg.map_or(0, |r| r + 1)
 }
 
-#[cfg(feature = "alloc")]
+#[allow(clippy::cast_possible_truncation)] // capped at 255
 fn compute_max_frame_depth(instructions: &[Instruction]) -> u8 {
-    // Upper bound: number of labels minus 1 (root label doesn't add depth).
-    let label_count = instructions
-        .iter()
-        .filter(|i| matches!(i, Instruction::Label))
-        .count();
-    label_count.saturating_sub(1).min(255) as u8
+    // Count distinct labels that are referenced by Frame or Recurse actions.
+    // This is a tighter upper bound than counting all labels.
+    let mut referenced_labels = alloc::collections::BTreeSet::new();
+    for instr in instructions {
+        if let Instruction::Dispatch { default, arms } = instr {
+            if let DefaultAction::Recurse(idx) = default {
+                referenced_labels.insert(*idx);
+            }
+            for arm in arms {
+                for action in &arm.actions {
+                    if let ArmAction::Frame(idx) = action {
+                        referenced_labels.insert(*idx);
+                    }
+                }
+            }
+        }
+    }
+    referenced_labels.len().min(255) as u8
 }
 
-#[cfg(feature = "alloc")]
 fn compute_flags(instructions: &[Instruction]) -> u16 {
     #[cfg(feature = "regex")]
     {
@@ -605,8 +628,8 @@ fn compute_flags(instructions: &[Instruction]) -> u16 {
 ///
 /// Panics (in debug builds) if any register index >= 16 or if a label
 /// index references a non-existent label.
-#[cfg(feature = "alloc")]
 #[must_use]
+#[allow(clippy::cast_possible_truncation)] // bytecode << 4 GB
 pub fn encode(instructions: &[Instruction]) -> Vec<u8> {
     let label_offsets = resolve_label_offsets(instructions);
     let register_count = compute_register_count(instructions);
@@ -634,7 +657,6 @@ pub fn encode(instructions: &[Instruction]) -> Vec<u8> {
 // Decode
 // ═══════════════════════════════════════════════════════════════════════
 
-#[cfg(feature = "alloc")]
 fn check_reg_decode(reg: u8) -> Result<(), DecodeError> {
     if reg >= 16 {
         Err(DecodeError::RegisterOutOfRange(reg))
@@ -646,7 +668,6 @@ fn check_reg_decode(reg: u8) -> Result<(), DecodeError> {
 /// Decode a single instruction from the reader, returning raw byte
 /// offsets for any FRAME/RECURSE targets (not yet resolved to label
 /// indices).
-#[cfg(feature = "alloc")]
 #[allow(clippy::too_many_lines)]
 fn decode_instruction(r: &mut Reader<'_>, start_offset: usize) -> Result<Instruction, DecodeError> {
     let opcode = r.read_u8()?;
@@ -782,8 +803,10 @@ fn decode_instruction(r: &mut Reader<'_>, start_offset: usize) -> Result<Instruc
         OP_IN_SET => {
             let reg = r.read_u8()?;
             check_reg_decode(reg)?;
-            let count = r.read_uvarint()? as usize;
-            let mut values = Vec::with_capacity(count);
+            let count = r.read_uvarint_as_usize()?;
+            // Cap capacity hint: each svarint is >= 1 byte.
+            let cap = count.min(r.remaining());
+            let mut values = Vec::with_capacity(cap);
             for _ in 0..count {
                 values.push(r.read_svarint()?);
             }
@@ -799,14 +822,13 @@ fn decode_instruction(r: &mut Reader<'_>, start_offset: usize) -> Result<Instruc
     }
 }
 
-#[cfg(feature = "alloc")]
 fn decode_dispatch(r: &mut Reader<'_>) -> Result<Instruction, DecodeError> {
     let default_kind = r.read_u8()?;
     let default = match default_kind {
         0 => DefaultAction::Skip,
         1 => DefaultAction::Copy,
         2 => {
-            let target = r.read_uvarint()? as u32;
+            let target = r.read_uvarint_as_u32()?;
             DefaultAction::Recurse(target)
         }
         _ => {
@@ -817,11 +839,13 @@ fn decode_dispatch(r: &mut Reader<'_>) -> Result<Instruction, DecodeError> {
         }
     };
 
-    let arm_count = r.read_uvarint()? as usize;
-    let mut arms = Vec::with_capacity(arm_count);
+    let arm_count = r.read_uvarint_as_usize()?;
+    // Cap capacity: each arm is >= 4 bytes (match_kind + field_num + action_count + action).
+    let arm_cap = arm_count.min(r.remaining() / 4);
+    let mut arms = Vec::with_capacity(arm_cap);
     for _ in 0..arm_count {
         let match_kind = r.read_u8()?;
-        let field_num = r.read_uvarint()? as u32;
+        let field_num = r.read_uvarint_as_u32()?;
         let match_ = match match_kind {
             0 => ArmMatch::Field(field_num),
             1 => {
@@ -840,11 +864,13 @@ fn decode_dispatch(r: &mut Reader<'_>) -> Result<Instruction, DecodeError> {
             }
         };
 
-        let action_count = r.read_uvarint()? as usize;
+        let action_count = r.read_uvarint_as_usize()?;
         if action_count == 0 {
             return Err(DecodeError::EmptyArmActions);
         }
-        let mut actions = Vec::with_capacity(action_count);
+        // Cap capacity: each action is >= 1 byte.
+        let action_cap = action_count.min(r.remaining());
+        let mut actions = Vec::with_capacity(action_cap);
         for _ in 0..action_count {
             let ak = r.read_u8()?;
             let action = match ak {
@@ -861,7 +887,7 @@ fn decode_dispatch(r: &mut Reader<'_>) -> Result<Instruction, DecodeError> {
                     ArmAction::Decode { reg, encoding }
                 }
                 3 => {
-                    let target = r.read_uvarint()? as u32;
+                    let target = r.read_uvarint_as_u32()?;
                     ArmAction::Frame(target)
                 }
                 _ => {
@@ -881,14 +907,13 @@ fn decode_dispatch(r: &mut Reader<'_>) -> Result<Instruction, DecodeError> {
 
 /// Resolve raw byte-offset targets in decoded instructions back to label
 /// indices, and validate that all targets point to LABEL opcodes.
-#[cfg(feature = "alloc")]
 fn resolve_targets_to_labels(
     instructions: &mut [Instruction],
     label_byte_offsets: &[(usize, u32)], // (instruction_byte_offset, label_index)
 ) -> Result<(), DecodeError> {
     let lookup = |byte_offset: u32| -> Result<u32, DecodeError> {
         for &(off, idx) in label_byte_offsets {
-            if off as u32 == byte_offset {
+            if u32::try_from(off).ok() == Some(byte_offset) {
                 return Ok(idx);
             }
         }
@@ -921,7 +946,6 @@ fn resolve_targets_to_labels(
 /// # Errors
 ///
 /// Returns [`DecodeError`] for any header or bytecode validation failure.
-#[cfg(feature = "alloc")]
 pub fn decode(buf: &[u8]) -> Result<(ProgramHeader, Vec<Instruction>), DecodeError> {
     let program = Program::from_bytes(buf)?;
     let mut r = Reader::new(program.bytecode);
@@ -951,12 +975,10 @@ pub fn decode(buf: &[u8]) -> Result<(ProgramHeader, Vec<Instruction>), DecodeErr
 ///
 /// Target `u32` values are returned as **raw byte offsets** (as stored in
 /// the binary). Use [`decode`] if you need label-index-based targets.
-#[cfg(feature = "alloc")]
 pub struct InstructionIter<'a> {
     reader: Reader<'a>,
 }
 
-#[cfg(feature = "alloc")]
 impl<'a> InstructionIter<'a> {
     /// Create an iterator starting at the beginning of `bytecode`.
     #[must_use]
@@ -986,7 +1008,6 @@ impl<'a> InstructionIter<'a> {
     }
 }
 
-#[cfg(feature = "alloc")]
 impl Iterator for InstructionIter<'_> {
     type Item = Result<Instruction, DecodeError>;
 
@@ -1504,9 +1525,8 @@ mod tests {
         ];
         let encoded = encode(&instructions);
         let (header, _) = decode(&encoded).unwrap();
-        // 1 label → max_frame_depth = 0 (labels - 1, but min 0)
-        // Actually: label_count = 1, saturating_sub(1) = 0
-        assert_eq!(header.max_frame_depth, 0);
+        // 1 Frame action referencing 1 distinct label → max_frame_depth = 1
+        assert_eq!(header.max_frame_depth, 1);
     }
 
     // ─────────────────────────────────── Error cases
