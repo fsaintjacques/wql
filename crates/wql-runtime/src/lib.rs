@@ -2,4 +2,10 @@
 
 extern crate alloc;
 
-// Public API defined in Block 3.
+pub mod error;
+pub(crate) mod wire;
+
+#[cfg(test)]
+pub(crate) mod test_utils;
+
+pub use error::RuntimeError;
