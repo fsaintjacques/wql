@@ -686,6 +686,7 @@ fn build_combined_dispatch<'a>(
         } else {
             // Multi-segment: need Frame
             let field_num = info.path[0];
+            let is_new = !arms_map.contains_key(&field_num);
             let actions = arms_map.entry(field_num).or_default();
             let nested_field = NestedFieldInfo {
                 remaining_path: info.path[1..].to_vec(),
@@ -708,6 +709,11 @@ fn build_combined_dispatch<'a>(
                     .push(nested_field);
             } else {
                 let label = emitter.alloc_label();
+                // If predicate-only and preserve_unknowns, add Copy before Frame
+                // so the nested message is preserved in the output.
+                if is_new && preserve_unknowns {
+                    actions.push(ArmAction::Copy);
+                }
                 actions.push(ArmAction::Frame(label));
                 pred_deferred.push(DeferredPredicateNested {
                     fields: vec![nested_field],

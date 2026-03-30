@@ -299,6 +299,13 @@ WHERE age > 18 SELECT { name, ... }
 {"name": "Alice", "age": 30, "status": "ACTIVE"}
 <none>
 
+WHERE address.city == "NYC" SELECT { name, ... }
+{"name": "Alice", "age": 30, "address": {"city": "NYC", "country": "US"}, "status": "ACTIVE"}
+{"name": "Bob", "age": 17, "address": {"city": "London"}}
+----
+{"name": "Alice", "age": 30, "address": {"city": "NYC", "country": "US"}, "status": "ACTIVE"}
+<none>
+
 WHERE age > 18 SELECT { age }
 {"name": "Alice", "age": 30}
 {"name": "Bob", "age": 17}

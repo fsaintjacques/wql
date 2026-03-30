@@ -8,12 +8,16 @@ use prost::Message;
 use wql_compiler::{compile, CompileOptions};
 
 // ── Generated types from proto/testdata.proto ──
+// Checked in at tests/testdata/testdata.{rs,bin}. Regenerate with:
+//   protoc --descriptor_set_out=tests/testdata/testdata.bin --include_imports proto/testdata.proto
+//   (prost-build also generates testdata.rs from the proto)
+#[allow(clippy::all, clippy::pedantic)]
 mod testdata {
-    include!(concat!(env!("OUT_DIR"), "/testdata.rs"));
+    include!("testdata/testdata.rs");
 }
 
 /// The serialized `FileDescriptorSet` for the test schema.
-const DESCRIPTOR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/testdata.bin"));
+const DESCRIPTOR: &[u8] = include_bytes!("testdata/testdata.bin");
 
 // ═══════════════════════════════════════════════════════════════════════
 // Helpers

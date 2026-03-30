@@ -12,9 +12,6 @@ wql-ir      = { workspace = true }
 prost       = "0.13"
 prost-types = "0.13"    # FileDescriptorSet for schema binding
 
-[build-dependencies]
-prost-build = "0.13"
-
 [dev-dependencies]
 wql-runtime    = { workspace = true }
 prost-reflect  = { version = "0.14", features = ["serde"] }

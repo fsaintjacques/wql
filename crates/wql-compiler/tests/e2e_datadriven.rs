@@ -32,7 +32,7 @@ use prost_reflect::{DynamicMessage, MessageDescriptor};
 use serde_json::Value;
 use wql_compiler::{compile, CompileOptions};
 
-const DESCRIPTOR_BYTES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/testdata.bin"));
+const DESCRIPTOR_BYTES: &[u8] = include_bytes!("testdata/testdata.bin");
 
 fn descriptor_pool() -> prost_reflect::DescriptorPool {
     prost_reflect::DescriptorPool::decode(DESCRIPTOR_BYTES).expect("failed to decode descriptor")
@@ -162,6 +162,9 @@ fn proto_to_json(desc: &MessageDescriptor, bytes: &[u8]) -> Value {
 }
 
 /// Normalize for comparison: strip defaults, coerce int64 strings to numbers.
+/// Note: this coerces ALL numeric strings, so a proto `string` field containing
+/// `"42"` would compare equal to an `int64` field with value `42`. Acceptable
+/// since the test schema doesn't mix these, but be aware when adding test cases.
 fn normalize(v: &Value) -> Value {
     match v {
         Value::Object(map) => {
