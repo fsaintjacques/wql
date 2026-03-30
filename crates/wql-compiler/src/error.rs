@@ -43,3 +43,93 @@ impl std::fmt::Display for ParseError {
 }
 
 impl std::error::Error for ParseError {}
+
+// ═══════════════════════════════════════════════════════════════════════
+// CompileError
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Errors produced during WQL compilation.
+#[derive(Debug)]
+pub enum CompileError {
+    /// Source failed to parse (wraps `ParseError`).
+    Parse(ParseError),
+
+    /// Named field not found in the schema's message descriptor.
+    UnresolvedField { field: String, span: Span },
+
+    /// Literal type does not match the field's proto type.
+    TypeError {
+        field: String,
+        expected: &'static str,
+        actual: &'static str,
+        span: Span,
+    },
+
+    /// Root message type or nested message type not found in the schema.
+    InvalidMessageType { type_name: String },
+
+    /// Schema-bound mode requires `root_message` in `CompileOptions`.
+    MissingRootMessage,
+
+    /// Schema-free mode encountered a named field reference.
+    NamedFieldWithoutSchema { field: String, span: Span },
+
+    /// Program requires more than 16 registers.
+    TooManyRegisters,
+
+    /// Failed to decode the `FileDescriptorSet` bytes.
+    InvalidSchema(String),
+}
+
+impl From<ParseError> for CompileError {
+    fn from(e: ParseError) -> Self {
+        Self::Parse(e)
+    }
+}
+
+impl std::fmt::Display for CompileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parse(e) => write!(f, "{e}"),
+            Self::UnresolvedField { field, span } => {
+                write!(
+                    f,
+                    "unresolved field '{field}' at byte {}..{}",
+                    span.start, span.end
+                )
+            }
+            Self::TypeError {
+                field,
+                expected,
+                actual,
+                span,
+            } => {
+                write!(
+                    f,
+                    "type error for field '{field}' at byte {}..{}: expected {expected}, found {actual}",
+                    span.start, span.end
+                )
+            }
+            Self::InvalidMessageType { type_name } => {
+                write!(f, "message type '{type_name}' not found in schema")
+            }
+            Self::MissingRootMessage => {
+                write!(
+                    f,
+                    "schema-bound mode requires root_message in CompileOptions"
+                )
+            }
+            Self::NamedFieldWithoutSchema { field, span } => {
+                write!(
+                    f,
+                    "named field '{field}' at byte {}..{} requires a schema",
+                    span.start, span.end
+                )
+            }
+            Self::TooManyRegisters => write!(f, "program requires more than 16 registers"),
+            Self::InvalidSchema(msg) => write!(f, "invalid schema: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for CompileError {}

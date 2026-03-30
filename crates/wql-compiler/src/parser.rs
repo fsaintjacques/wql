@@ -1,6 +1,6 @@
 use crate::ast::{
-    CompareOp, FieldPath, FieldRef, Literal, Predicate, PredicateKind, Projection,
-    ProjectionItem, ProjectionKind, Query, StringOp,
+    CompareOp, FieldPath, FieldRef, Literal, Predicate, PredicateKind, Projection, ProjectionItem,
+    ProjectionKind, Query, StringOp,
 };
 use crate::error::{ParseError, ParseErrorKind};
 use crate::lexer::{Lexer, Token, TokenKind};
@@ -81,9 +81,7 @@ impl<'a> Parser<'a> {
                         return Ok(ProjectionKind::DeepCopy { exclusions });
                     }
                     TokenKind::RBrace => {
-                        return Ok(ProjectionKind::DeepCopy {
-                            exclusions: vec![],
-                        });
+                        return Ok(ProjectionKind::DeepCopy { exclusions: vec![] });
                     }
                     _ => {
                         // `..name` — this is actually a deep search item in inclusion mode.
@@ -665,7 +663,8 @@ mod tests {
             } => {
                 assert_eq!(*preserve_unknowns, preserve, "preserve_unknowns mismatch");
                 let names: Vec<String> = items.iter().map(item_debug).collect();
-                let expected: Vec<String> = expected_items.iter().map(|s| (*s).to_string()).collect();
+                let expected: Vec<String> =
+                    expected_items.iter().map(|s| (*s).to_string()).collect();
                 assert_eq!(names, expected);
             }
             ProjectionKind::DeepCopy { .. } => panic!("expected Inclusion, got DeepCopy"),
@@ -782,7 +781,10 @@ mod tests {
         assert_inclusion(&proj, &["#1", "#3{...}"], false);
 
         if let ProjectionKind::Inclusion { items, .. } = &proj.kind {
-            assert!(matches!(&items[0], ProjectionItem::Field(FieldRef::Number(1, _))));
+            assert!(matches!(
+                &items[0],
+                ProjectionItem::Field(FieldRef::Number(1, _))
+            ));
             if let ProjectionItem::Nested {
                 field: FieldRef::Number(3, _),
                 projection,

@@ -68,7 +68,10 @@ fn schema_free_projection() {
     let ProjectionKind::Inclusion { items, .. } = &p.kind else {
         panic!("expected Inclusion");
     };
-    assert!(matches!(&items[0], ProjectionItem::Field(FieldRef::Number(1, _))));
+    assert!(matches!(
+        &items[0],
+        ProjectionItem::Field(FieldRef::Number(1, _))
+    ));
 }
 
 #[test]
@@ -127,12 +130,16 @@ fn predicate_parenthesized_precedence() {
     // Without parens: a > 1 || b > 2 && c > 3 → Or(a, And(b, c))
     let q1 = parse("a > 1 || b > 2 && c > 3").unwrap();
     let Query::Predicate(p1) = q1 else { panic!() };
-    assert!(matches!(&p1.kind, PredicateKind::Or(_, rhs) if matches!(&rhs.kind, PredicateKind::And(_, _))));
+    assert!(
+        matches!(&p1.kind, PredicateKind::Or(_, rhs) if matches!(&rhs.kind, PredicateKind::And(_, _)))
+    );
 
     // With parens: (a > 1 || b > 2) && c > 3 → And(Or(a, b), c)
     let q2 = parse("(a > 1 || b > 2) && c > 3").unwrap();
     let Query::Predicate(p2) = q2 else { panic!() };
-    assert!(matches!(&p2.kind, PredicateKind::And(lhs, _) if matches!(&lhs.kind, PredicateKind::Or(_, _))));
+    assert!(
+        matches!(&p2.kind, PredicateKind::And(lhs, _) if matches!(&lhs.kind, PredicateKind::Or(_, _)))
+    );
 }
 
 #[test]

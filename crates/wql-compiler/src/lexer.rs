@@ -280,20 +280,32 @@ impl<'a> Lexer<'a> {
     fn lex_dots(&mut self, start: usize) -> Token {
         if self.peek_byte_at(1) == Some(b'.') && self.peek_byte_at(2) == Some(b'.') {
             self.pos += 3;
-            Token { kind: TokenKind::Ellipsis, span: Span::new(start, self.pos) }
+            Token {
+                kind: TokenKind::Ellipsis,
+                span: Span::new(start, self.pos),
+            }
         } else if self.peek_byte_at(1) == Some(b'.') {
             self.pos += 2;
-            Token { kind: TokenKind::DotDot, span: Span::new(start, self.pos) }
+            Token {
+                kind: TokenKind::DotDot,
+                span: Span::new(start, self.pos),
+            }
         } else {
             self.pos += 1;
-            Token { kind: TokenKind::Dot, span: Span::new(start, self.pos) }
+            Token {
+                kind: TokenKind::Dot,
+                span: Span::new(start, self.pos),
+            }
         }
     }
 
     fn lex_eq(&mut self, start: usize) -> Result<Token, ParseError> {
         if self.peek_byte_at(1) == Some(b'=') {
             self.pos += 2;
-            Ok(Token { kind: TokenKind::EqEq, span: Span::new(start, self.pos) })
+            Ok(Token {
+                kind: TokenKind::EqEq,
+                span: Span::new(start, self.pos),
+            })
         } else {
             Err(ParseError {
                 kind: ParseErrorKind::UnexpectedChar('='),
@@ -305,37 +317,58 @@ impl<'a> Lexer<'a> {
     fn lex_bang(&mut self, start: usize) -> Token {
         if self.peek_byte_at(1) == Some(b'=') {
             self.pos += 2;
-            Token { kind: TokenKind::BangEq, span: Span::new(start, self.pos) }
+            Token {
+                kind: TokenKind::BangEq,
+                span: Span::new(start, self.pos),
+            }
         } else {
             self.pos += 1;
-            Token { kind: TokenKind::Bang, span: Span::new(start, self.pos) }
+            Token {
+                kind: TokenKind::Bang,
+                span: Span::new(start, self.pos),
+            }
         }
     }
 
     fn lex_lt(&mut self, start: usize) -> Token {
         if self.peek_byte_at(1) == Some(b'=') {
             self.pos += 2;
-            Token { kind: TokenKind::Lte, span: Span::new(start, self.pos) }
+            Token {
+                kind: TokenKind::Lte,
+                span: Span::new(start, self.pos),
+            }
         } else {
             self.pos += 1;
-            Token { kind: TokenKind::Lt, span: Span::new(start, self.pos) }
+            Token {
+                kind: TokenKind::Lt,
+                span: Span::new(start, self.pos),
+            }
         }
     }
 
     fn lex_gt(&mut self, start: usize) -> Token {
         if self.peek_byte_at(1) == Some(b'=') {
             self.pos += 2;
-            Token { kind: TokenKind::Gte, span: Span::new(start, self.pos) }
+            Token {
+                kind: TokenKind::Gte,
+                span: Span::new(start, self.pos),
+            }
         } else {
             self.pos += 1;
-            Token { kind: TokenKind::Gt, span: Span::new(start, self.pos) }
+            Token {
+                kind: TokenKind::Gt,
+                span: Span::new(start, self.pos),
+            }
         }
     }
 
     fn lex_amp(&mut self, start: usize) -> Result<Token, ParseError> {
         if self.peek_byte_at(1) == Some(b'&') {
             self.pos += 2;
-            Ok(Token { kind: TokenKind::AmpAmp, span: Span::new(start, self.pos) })
+            Ok(Token {
+                kind: TokenKind::AmpAmp,
+                span: Span::new(start, self.pos),
+            })
         } else {
             Err(ParseError {
                 kind: ParseErrorKind::UnexpectedChar('&'),
@@ -347,7 +380,10 @@ impl<'a> Lexer<'a> {
     fn lex_pipe(&mut self, start: usize) -> Result<Token, ParseError> {
         if self.peek_byte_at(1) == Some(b'|') {
             self.pos += 2;
-            Ok(Token { kind: TokenKind::PipePipe, span: Span::new(start, self.pos) })
+            Ok(Token {
+                kind: TokenKind::PipePipe,
+                span: Span::new(start, self.pos),
+            })
         } else {
             Err(ParseError {
                 kind: ParseErrorKind::UnexpectedChar('|'),
@@ -600,10 +636,7 @@ mod tests {
     #[test]
     fn lex_string_escapes() {
         let kinds = lex_kinds(r#""a\"b\\c\n\t\x41""#).unwrap();
-        assert_eq!(
-            kinds,
-            vec![TokenKind::StringLit("a\"b\\c\n\tA".into())]
-        );
+        assert_eq!(kinds, vec![TokenKind::StringLit("a\"b\\c\n\tA".into())]);
     }
 
     #[test]
@@ -731,10 +764,7 @@ mod tests {
     #[test]
     fn lex_string_hex_escape() {
         let kinds = lex_kinds(r#""\x00\xff""#).unwrap();
-        assert_eq!(
-            kinds,
-            vec![TokenKind::StringLit("\x00\u{ff}".into())]
-        );
+        assert_eq!(kinds, vec![TokenKind::StringLit("\x00\u{ff}".into())]);
     }
 
     #[test]

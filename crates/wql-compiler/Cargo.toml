@@ -5,11 +5,15 @@ edition = "2021"
 
 [features]
 default = ["regex"]
-regex   = []    # enables compilation of BYTES_MATCHES instructions
+regex   = ["wql-ir/regex"]    # enables compilation of BYTES_MATCHES instructions
 
 [dependencies]
 wql-ir      = { workspace = true }
+prost       = "0.13"
 prost-types = "0.13"    # FileDescriptorSet for schema binding
+
+[dev-dependencies]
+wql-runtime = { workspace = true }
 
 [lints]
 workspace = true

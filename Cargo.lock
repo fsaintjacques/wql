@@ -686,8 +686,10 @@ dependencies = [
 name = "wql-compiler"
 version = "0.1.0"
 dependencies = [
+ "prost",
  "prost-types",
  "wql-ir",
+ "wql-runtime",
 ]
 
 [[package]]
