@@ -242,8 +242,9 @@ fn cli_eval_delimited_e2e() {
 
     for case in &cases {
         let desc = resolve_message(&pool, &case.message);
+        // Infer mode from expected output format, not query string.
         let is_filter = case.expected.iter().all(|e| e == "true" || e == "false");
-        let is_combined = case.query.contains("WHERE") && case.query.contains("SELECT");
+        let is_combined = !is_filter && case.expected.iter().any(|e| e == "<none>");
 
         // Encode input records as delimited stream
         let input_records: Vec<Vec<u8>> = case

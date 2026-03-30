@@ -253,8 +253,9 @@ fn run_case(pool: &prost_reflect::DescriptorPool, case: &TestCase) -> Result<usi
         }
     };
 
+    // Infer mode from expected output format, not query string.
     let is_filter = case.expected.iter().all(|e| e == "true" || e == "false");
-    let is_combined = case.query.contains("WHERE") && case.query.contains("SELECT");
+    let is_combined = !is_filter && case.expected.iter().any(|e| e == "<none>");
 
     let mut errors = Vec::new();
     let mut ok_count = 0;

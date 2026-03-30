@@ -46,6 +46,7 @@ static size_t encode_varint(uint64_t val, uint8_t *buf) {
 /* ── Read all of stdin ── */
 
 static uint8_t *read_all_stdin(size_t *out_len) {
+    *out_len = 0;
     size_t cap = 4096, len = 0;
     uint8_t *buf = malloc(cap);
     if (!buf) return NULL;
@@ -56,7 +57,7 @@ static uint8_t *read_all_stdin(size_t *out_len) {
         if (len == cap) {
             cap *= 2;
             uint8_t *tmp = realloc(buf, cap);
-            if (!tmp) { free(buf); return NULL; }
+            if (!tmp) { free(buf); *out_len = 0; return NULL; }
             buf = tmp;
         }
     }
@@ -80,7 +81,12 @@ static uint8_t *read_file(const char *path, size_t *out_len) {
     return buf;
 }
 
-/* ── Classify query mode ── */
+/* ── Classify query mode ──
+ *
+ * Uses string heuristics since the C API doesn't expose the parsed AST.
+ * This is sufficient for the controlled e2e test data; a production C
+ * consumer should expose mode from the compiler or bytecode header.
+ */
 
 typedef enum { MODE_FILTER, MODE_PROJECT, MODE_COMBINED } query_mode_t;
 
@@ -104,9 +110,11 @@ static int eval_single(const wql_program_t *prog, query_mode_t mode,
         return r == 1 ? 0 : 1;
     }
 
-    uint8_t *output = malloc(input_len * 2 + 256);
-    if (!output) { fprintf(stderr, "wqlc_c: out of memory\n"); return 2; }
+    /* Projection output is at most the input size (fields are stripped, never added).
+       The 2x + 256 is generous headroom for the test data. */
     size_t out_cap = input_len * 2 + 256;
+    uint8_t *output = malloc(out_cap);
+    if (!output) { fprintf(stderr, "wqlc_c: out of memory\n"); return 2; }
 
     if (mode == MODE_COMBINED) {
         int64_t n = wql_project_and_filter(prog, input, input_len, output, out_cap, &err);
@@ -247,7 +255,7 @@ int main(int argc, char **argv) {
     }
 
     /* Read stdin */
-    size_t input_len;
+    size_t input_len = 0;
     uint8_t *input = read_all_stdin(&input_len);
     if (!input && input_len > 0) {
         fprintf(stderr, "wqlc_c: failed to read stdin\n");
