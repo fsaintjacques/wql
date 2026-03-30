@@ -1,0 +1,330 @@
+# message: testdata.Person
+
+# ── Projection: flat fields ──
+
+{ name, age }
+{"name": "Alice", "age": 30, "status": "ACTIVE", "tags": ["admin", "staff"]}
+{"name": "Bob", "age": 17, "status": "INACTIVE"}
+----
+{"name": "Alice", "age": 30}
+{"name": "Bob", "age": 17}
+
+{ name }
+{"name": "Alice", "age": 30}
+{"name": "Bob"}
+{}
+----
+{"name": "Alice"}
+{"name": "Bob"}
+{}
+
+{ }
+{"name": "Alice", "age": 30}
+----
+{}
+
+{ ... }
+{"name": "Alice", "age": 30, "status": "ACTIVE"}
+----
+{"name": "Alice", "age": 30, "status": "ACTIVE"}
+
+{ name, ... }
+{"name": "Alice", "age": 30, "status": "ACTIVE"}
+----
+{"name": "Alice", "age": 30, "status": "ACTIVE"}
+
+{ #1, #2 }
+{"name": "Alice", "age": 30, "status": "ACTIVE"}
+----
+{"name": "Alice", "age": 30}
+
+{ name, #2 }
+{"name": "Alice", "age": 30}
+----
+{"name": "Alice", "age": 30}
+
+# ── Projection: nested messages ──
+
+{ name, address { city } }
+{"name": "Alice", "address": {"city": "New York", "country": "US", "zip": 10001}}
+{"name": "Bob", "address": {"city": "London", "country": "UK"}}
+----
+{"name": "Alice", "address": {"city": "New York"}}
+{"name": "Bob", "address": {"city": "London"}}
+
+{ address { city, country } }
+{"name": "Alice", "address": {"city": "NYC", "country": "US", "zip": 10001}}
+----
+{"address": {"city": "NYC", "country": "US"}}
+
+{ name, address { city, location { lat } } }
+{"name": "Alice", "address": {"city": "NYC", "location": {"lat": 40712776, "lon": -74005974}}}
+----
+{"name": "Alice", "address": {"city": "NYC", "location": {"lat": 40712776}}}
+
+{ name, address { city, ... }, ... }
+{"name": "Alice", "address": {"city": "NYC", "country": "US", "zip": 10001}}
+----
+{"name": "Alice", "address": {"city": "NYC", "country": "US", "zip": 10001}}
+
+# ── Projection: absent fields ──
+
+{ name }
+{}
+{"age": 30}
+----
+{}
+{}
+
+{ address { city } }
+{"name": "Alice"}
+----
+{}
+
+# message: testdata.Order
+
+# ── Projection: repeated fields ──
+
+{ id, customer }
+{"id": 42, "customer": "Alice", "items": [{"sku": "W-1", "quantity": 2}, {"sku": "G-2"}], "totalCents": 8997, "shipped": true}
+----
+{"id": 42, "customer": "Alice"}
+
+{ customer, items { sku } }
+{"customer": "Alice", "items": [{"sku": "W-1", "quantity": 2, "price": 1999}, {"sku": "G-2", "quantity": 1, "price": 4999}]}
+----
+{"customer": "Alice", "items": [{"sku": "W-1"}, {"sku": "G-2"}]}
+
+# message: testdata.Person
+
+# ── Filter: integer comparisons ──
+
+age > 18
+{"name": "Alice", "age": 30}
+{"name": "Bob", "age": 17}
+{"name": "Charlie", "age": 18}
+----
+true
+false
+false
+
+age >= 18
+{"age": 18}
+{"age": 17}
+----
+true
+false
+
+age < 18
+{"age": 17}
+{"age": 18}
+{"age": 30}
+----
+true
+false
+false
+
+age <= 18
+{"age": 18}
+{"age": 19}
+----
+true
+false
+
+age == 30
+{"age": 30}
+{"age": 17}
+----
+true
+false
+
+age != 30
+{"age": 30}
+{"age": 17}
+----
+false
+true
+
+# ── Filter: string comparisons ──
+
+name == "Alice"
+{"name": "Alice"}
+{"name": "Bob"}
+{}
+----
+true
+false
+false
+
+name != "Alice"
+{"name": "Bob"}
+{"name": "Alice"}
+----
+true
+false
+
+name starts_with "Ali"
+{"name": "Alice"}
+{"name": "Bob"}
+----
+true
+false
+
+name ends_with "ice"
+{"name": "Alice"}
+{"name": "Bob"}
+----
+true
+false
+
+name contains "lic"
+{"name": "Alice"}
+{"name": "Bob"}
+----
+true
+false
+
+# ── Filter: bool, enum, set, exists ──
+
+# message: testdata.Order
+
+shipped == true
+{"shipped": true}
+{"shipped": false}
+----
+true
+false
+
+# message: testdata.Person
+
+status == 1
+{"status": "ACTIVE"}
+{"status": "INACTIVE"}
+{"status": "UNKNOWN"}
+----
+true
+false
+false
+
+status in [1, 2]
+{"status": "ACTIVE"}
+{"status": "INACTIVE"}
+{"status": "UNKNOWN"}
+----
+true
+true
+false
+
+exists(address)
+{"name": "Alice", "address": {"city": "NYC"}}
+{"name": "Bob"}
+----
+true
+false
+
+# ── Filter: nested fields ──
+
+address.city == "New York"
+{"address": {"city": "New York"}}
+{"address": {"city": "London"}}
+----
+true
+false
+
+address.zip > 10000
+{"address": {"zip": 10001}}
+{"address": {"zip": 5000}}
+----
+true
+false
+
+# ── Filter: logical operators ──
+
+age > 18 && status == 1
+{"age": 30, "status": "ACTIVE"}
+{"age": 17, "status": "ACTIVE"}
+{"age": 30, "status": "INACTIVE"}
+----
+true
+false
+false
+
+age > 18 || status == 2
+{"age": 30, "status": "ACTIVE"}
+{"age": 17, "status": "INACTIVE"}
+{"age": 17, "status": "ACTIVE"}
+----
+true
+true
+false
+
+!age > 50
+{"age": 30}
+{"age": 60}
+----
+true
+false
+
+(age > 18 || status == 2) && age < 50
+{"age": 10, "status": "INACTIVE"}
+{"age": 60, "status": "ACTIVE"}
+{"age": 10, "status": "ACTIVE"}
+----
+true
+false
+false
+
+# ── Combined: WHERE ... SELECT ──
+
+WHERE age > 18 SELECT { name }
+{"name": "Alice", "age": 30, "status": "ACTIVE"}
+{"name": "Bob", "age": 17}
+{"name": "Charlie", "age": 25}
+----
+{"name": "Alice"}
+<none>
+{"name": "Charlie"}
+
+WHERE status == 1 SELECT { name, address { city, country } }
+{"name": "Alice", "age": 30, "address": {"city": "NYC", "country": "US", "zip": 10001}, "status": "ACTIVE"}
+{"name": "Bob", "status": "INACTIVE"}
+----
+{"name": "Alice", "address": {"city": "NYC", "country": "US"}}
+<none>
+
+WHERE age > 18 SELECT { name, ... }
+{"name": "Alice", "age": 30, "status": "ACTIVE"}
+{"name": "Bob", "age": 17}
+----
+{"name": "Alice", "age": 30, "status": "ACTIVE"}
+<none>
+
+WHERE age > 18 SELECT { age }
+{"name": "Alice", "age": 30}
+{"name": "Bob", "age": 17}
+----
+{"age": 30}
+<none>
+
+# message: testdata.Order
+
+WHERE total_cents > 5000 SELECT { id, customer }
+{"id": 42, "customer": "Alice", "totalCents": 8997, "shipped": true}
+{"id": 1, "customer": "Bob", "totalCents": 500}
+----
+{"id": 42, "customer": "Alice"}
+<none>
+
+# ── Edge cases ──
+
+# message: testdata.Person
+
+age > 0
+{}
+----
+false
+
+WHERE age > 0 SELECT { name }
+{}
+----
+<none>

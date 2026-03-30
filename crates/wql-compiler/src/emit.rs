@@ -554,9 +554,17 @@ fn emit_combined(
         BoundProjectionKind::Inclusion { .. } => None,
     };
 
+    let preserve_unknowns = matches!(
+        &proj.kind,
+        BoundProjectionKind::Inclusion {
+            preserve_unknowns: true,
+            ..
+        }
+    );
+
     // Build the merged DISPATCH: combine projection arms with predicate decode arms
     let (merged_arms, proj_deferred, pred_deferred, merged_pred_fields) =
-        build_combined_dispatch(proj, &field_map, emitter);
+        build_combined_dispatch(proj, &field_map, emitter, preserve_unknowns);
 
     let default = match &proj.kind {
         BoundProjectionKind::Inclusion {
@@ -618,6 +626,7 @@ fn build_combined_dispatch<'a>(
     proj: &'a BoundProjection,
     field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
     emitter: &mut Emitter,
+    preserve_unknowns: bool,
 ) -> CombinedDispatchResult<'a> {
     let mut arms_map: HashMap<u32, Vec<ArmAction>> = HashMap::new();
     let mut proj_deferred: Vec<DeferredCombinedNested<'a>> = Vec::new();
@@ -658,6 +667,7 @@ fn build_combined_dispatch<'a>(
     for info in field_map.values() {
         if info.path.len() == 1 {
             let field_num = info.path[0];
+            let is_new = !arms_map.contains_key(&field_num);
             let actions = arms_map.entry(field_num).or_default();
             // Insert Decode before any Copy (Decode first, then Copy)
             actions.insert(
@@ -667,6 +677,12 @@ fn build_combined_dispatch<'a>(
                     encoding: info.encoding,
                 },
             );
+            // If this field is predicate-only and preserve_unknowns is set,
+            // the default Copy action no longer applies (explicit arm overrides),
+            // so we must add Copy to preserve the field in the output.
+            if is_new && preserve_unknowns {
+                actions.push(ArmAction::Copy);
+            }
         } else {
             // Multi-segment: need Frame
             let field_num = info.path[0];
