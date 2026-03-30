@@ -5,8 +5,8 @@
  *   wqlc_c eval -q <query> [-s <schema.bin> -m <message>] [--delimited]
  *
  * Reads protobuf from stdin, writes to stdout.
- *   Single mode:    one message in, one result out. Exit 0=pass, 1=filtered, 2=error.
- *   Delimited mode: varint length-prefixed stream in/out.
+ *   Single mode:    reads all of stdin as one message. Exit 0=pass, 1=filtered, 2=error.
+ *   Delimited mode: streams varint length-prefixed records one at a time.
  */
 
 #include "../include/wql.h"
@@ -14,36 +14,44 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── Varint codec ── */
+/* ── Varint I/O ── */
 
-static int read_varint(const uint8_t *buf, size_t buf_len, uint64_t *out, size_t *consumed) {
+/* Read a varint from FILE*, one byte at a time. Returns 0 on success,
+   -1 on clean EOF (no bytes read), -2 on truncated/malformed varint. */
+static int read_varint(FILE *f, uint64_t *out) {
     uint64_t val = 0;
     unsigned shift = 0;
-    for (size_t i = 0; i < buf_len; i++) {
-        val |= (uint64_t)(buf[i] & 0x7F) << shift;
-        if ((buf[i] & 0x80) == 0) {
+    for (;;) {
+        int c = fgetc(f);
+        if (c == EOF) {
+            return shift == 0 ? -1 : -2; /* clean EOF vs truncated */
+        }
+        val |= (uint64_t)(c & 0x7F) << shift;
+        if ((c & 0x80) == 0) {
             *out = val;
-            *consumed = i + 1;
             return 0;
         }
         shift += 7;
-        if (shift >= 64) return -1;
+        if (shift >= 64) return -2;
     }
-    return -1; /* incomplete */
 }
 
-static size_t encode_varint(uint64_t val, uint8_t *buf) {
-    size_t i = 0;
+static void write_varint(FILE *f, uint64_t val) {
     do {
         uint8_t byte = val & 0x7F;
         val >>= 7;
         if (val) byte |= 0x80;
-        buf[i++] = byte;
+        fputc(byte, f);
     } while (val);
-    return i;
 }
 
-/* ── Read all of stdin ── */
+/* Read exactly n bytes from FILE*. Returns 0 on success, -1 on short read. */
+static int read_exact(FILE *f, uint8_t *buf, size_t n) {
+    size_t got = fread(buf, 1, n, f);
+    return got == n ? 0 : -1;
+}
+
+/* ── Read all of stdin (for single-message mode) ── */
 
 static uint8_t *read_all_stdin(size_t *out_len) {
     *out_len = 0;
@@ -98,106 +106,130 @@ static query_mode_t classify(const char *query) {
     return MODE_FILTER;
 }
 
-/* ── Single message eval ── */
-
-static int eval_single(const wql_program_t *prog, query_mode_t mode,
-                       const uint8_t *input, size_t input_len) {
+/* ── Process a single record ──
+ * Returns: bytes written to *output (via *out_written), or:
+ *   0 = ok (projection/filter pass)
+ *   1 = filtered out
+ *   2 = error
+ */
+static int process_record(const wql_program_t *prog, query_mode_t mode,
+                          const uint8_t *input, size_t input_len,
+                          uint8_t *output, size_t output_cap,
+                          size_t *out_written) {
     char *err = NULL;
 
     if (mode == MODE_FILTER) {
         int r = wql_filter(prog, input, input_len, &err);
         if (r < 0) { fprintf(stderr, "wqlc_c: %s\n", err); wql_errmsg_free(err); return 2; }
+        *out_written = 0;
         return r == 1 ? 0 : 1;
     }
 
-    /* Projection output is at most the input size (fields are stripped, never added).
-       The 2x + 256 is generous headroom for the test data. */
-    size_t out_cap = input_len * 2 + 256;
-    uint8_t *output = malloc(out_cap);
-    if (!output) { fprintf(stderr, "wqlc_c: out of memory\n"); return 2; }
-
     if (mode == MODE_COMBINED) {
-        int64_t n = wql_project_and_filter(prog, input, input_len, output, out_cap, &err);
-        if (n == -2) { fprintf(stderr, "wqlc_c: %s\n", err); wql_errmsg_free(err); free(output); return 2; }
-        if (n == -1) { free(output); return 1; } /* filtered out */
-        fwrite(output, 1, (size_t)n, stdout);
-        free(output);
+        int64_t n = wql_project_and_filter(prog, input, input_len, output, output_cap, &err);
+        if (n == -2) { fprintf(stderr, "wqlc_c: %s\n", err); wql_errmsg_free(err); return 2; }
+        if (n == -1) { *out_written = 0; return 1; }
+        *out_written = (size_t)n;
         return 0;
     }
 
     /* PROJECT */
-    int64_t n = wql_project(prog, input, input_len, output, out_cap, &err);
-    if (n < 0) { fprintf(stderr, "wqlc_c: %s\n", err); wql_errmsg_free(err); free(output); return 2; }
-    fwrite(output, 1, (size_t)n, stdout);
-    free(output);
+    int64_t n = wql_project(prog, input, input_len, output, output_cap, &err);
+    if (n < 0) { fprintf(stderr, "wqlc_c: %s\n", err); wql_errmsg_free(err); return 2; }
+    *out_written = (size_t)n;
     return 0;
 }
 
-/* ── Delimited stream eval ── */
+/* ── Single message eval ── */
 
-static int eval_delimited(const wql_program_t *prog, query_mode_t mode,
-                          const uint8_t *data, size_t data_len) {
-    size_t pos = 0;
-    uint8_t varint_buf[10];
-    uint8_t *output = NULL;
-    size_t out_cap = 0;
-
-    while (pos < data_len) {
-        uint64_t rec_len;
-        size_t consumed;
-        if (read_varint(data + pos, data_len - pos, &rec_len, &consumed) < 0) {
-            fprintf(stderr, "wqlc_c: malformed varint\n");
-            free(output);
-            return 2;
-        }
-        pos += consumed;
-        if (pos + (size_t)rec_len > data_len) {
-            fprintf(stderr, "wqlc_c: truncated record\n");
-            free(output);
-            return 2;
-        }
-
-        const uint8_t *record = data + pos;
-        size_t record_len = (size_t)rec_len;
-        pos += record_len;
-
-        /* Ensure output buffer is big enough */
-        size_t needed = record_len * 2 + 256;
-        if (needed > out_cap) {
-            free(output);
-            out_cap = needed;
-            output = malloc(out_cap);
-            if (!output) { fprintf(stderr, "wqlc_c: out of memory\n"); return 2; }
-        }
-
-        char *err = NULL;
-
-        if (mode == MODE_FILTER) {
-            int r = wql_filter(prog, record, record_len, &err);
-            if (r < 0) { fprintf(stderr, "wqlc_c: %s\n", err); wql_errmsg_free(err); free(output); return 2; }
-            if (r == 1) {
-                /* Pass: write original record */
-                size_t vn = encode_varint(record_len, varint_buf);
-                fwrite(varint_buf, 1, vn, stdout);
-                fwrite(record, 1, record_len, stdout);
-            }
-        } else if (mode == MODE_COMBINED) {
-            int64_t n = wql_project_and_filter(prog, record, record_len, output, out_cap, &err);
-            if (n == -2) { fprintf(stderr, "wqlc_c: %s\n", err); wql_errmsg_free(err); free(output); return 2; }
-            if (n >= 0) {
-                size_t vn = encode_varint((uint64_t)n, varint_buf);
-                fwrite(varint_buf, 1, vn, stdout);
-                fwrite(output, 1, (size_t)n, stdout);
-            }
-        } else {
-            int64_t n = wql_project(prog, record, record_len, output, out_cap, &err);
-            if (n < 0) { fprintf(stderr, "wqlc_c: %s\n", err); wql_errmsg_free(err); free(output); return 2; }
-            size_t vn = encode_varint((uint64_t)n, varint_buf);
-            fwrite(varint_buf, 1, vn, stdout);
-            fwrite(output, 1, (size_t)n, stdout);
-        }
+static int eval_single(const wql_program_t *prog, query_mode_t mode) {
+    size_t input_len = 0;
+    uint8_t *input = read_all_stdin(&input_len);
+    if (!input && input_len > 0) {
+        fprintf(stderr, "wqlc_c: failed to read stdin\n");
+        return 2;
     }
 
+    /* Projection output <= input size. Generous headroom for test data. */
+    size_t out_cap = input_len * 2 + 256;
+    uint8_t *output = malloc(out_cap);
+    if (!output) { fprintf(stderr, "wqlc_c: out of memory\n"); free(input); return 2; }
+
+    size_t written = 0;
+    int rc = process_record(prog, mode, input, input_len, output, out_cap, &written);
+    if (rc == 0 && mode != MODE_FILTER) {
+        fwrite(output, 1, written, stdout);
+    } else if (rc == 0 && mode == MODE_FILTER) {
+        /* pass — nothing to write */
+    }
+
+    free(output);
+    free(input);
+    return rc;
+}
+
+/* ── Streaming delimited eval ── */
+
+static int eval_delimited(const wql_program_t *prog, query_mode_t mode) {
+    uint8_t *record = NULL;
+    uint8_t *output = NULL;
+    size_t rec_cap = 0, out_cap = 0;
+
+    for (;;) {
+        /* Read record length */
+        uint64_t rec_len;
+        int vr = read_varint(stdin, &rec_len);
+        if (vr == -1) break; /* clean EOF */
+        if (vr == -2) {
+            fprintf(stderr, "wqlc_c: malformed varint\n");
+            free(record); free(output);
+            return 2;
+        }
+
+        /* Grow record buffer if needed */
+        if ((size_t)rec_len > rec_cap) {
+            rec_cap = (size_t)rec_len;
+            free(record);
+            record = malloc(rec_cap);
+            if (!record) { fprintf(stderr, "wqlc_c: out of memory\n"); free(output); return 2; }
+        }
+
+        /* Read record body */
+        if (read_exact(stdin, record, (size_t)rec_len) < 0) {
+            fprintf(stderr, "wqlc_c: truncated record\n");
+            free(record); free(output);
+            return 2;
+        }
+
+        /* Grow output buffer if needed */
+        size_t needed = (size_t)rec_len * 2 + 256;
+        if (needed > out_cap) {
+            out_cap = needed;
+            free(output);
+            output = malloc(out_cap);
+            if (!output) { fprintf(stderr, "wqlc_c: out of memory\n"); free(record); return 2; }
+        }
+
+        size_t written = 0;
+        int rc = process_record(prog, mode, record, (size_t)rec_len, output, out_cap, &written);
+        if (rc == 2) { free(record); free(output); return 2; }
+
+        if (rc == 0) {
+            if (mode == MODE_FILTER) {
+                /* Pass: emit original record */
+                write_varint(stdout, rec_len);
+                fwrite(record, 1, (size_t)rec_len, stdout);
+            } else {
+                /* Emit projected output */
+                write_varint(stdout, (uint64_t)written);
+                fwrite(output, 1, written, stdout);
+            }
+        }
+        /* rc == 1: filtered out, emit nothing */
+    }
+
+    fflush(stdout);
+    free(record);
     free(output);
     return 0;
 }
@@ -254,24 +286,9 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    /* Read stdin */
-    size_t input_len = 0;
-    uint8_t *input = read_all_stdin(&input_len);
-    if (!input && input_len > 0) {
-        fprintf(stderr, "wqlc_c: failed to read stdin\n");
-        wql_program_free(prog);
-        return 2;
-    }
+    int rc = delimited ? eval_delimited(prog, classify(query))
+                       : eval_single(prog, classify(query));
 
-    query_mode_t mode = classify(query);
-    int rc;
-    if (delimited) {
-        rc = eval_delimited(prog, mode, input, input_len);
-    } else {
-        rc = eval_single(prog, mode, input, input_len);
-    }
-
-    free(input);
     wql_program_free(prog);
     return rc;
 }

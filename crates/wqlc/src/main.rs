@@ -172,101 +172,120 @@ fn eval_delimited(
     program: &wql_runtime::LoadedProgram,
     mode: QueryMode,
 ) -> Result<ExitCode, String> {
-    let all_input = read_stdin()?;
-    let records = parse_delimited(&all_input)?;
-    let mut stdout = io::stdout().lock();
+    let mut stdin = io::BufReader::new(io::stdin().lock());
+    let mut stdout = io::BufWriter::new(io::stdout().lock());
+    let mut record_buf = Vec::new();
+    let mut output_buf = Vec::new();
+    let mut i = 0usize;
 
-    for (i, record) in records.iter().enumerate() {
+    loop {
+        let rec_len = match read_varint_from(&mut stdin) {
+            #[allow(clippy::cast_possible_truncation)]
+            Ok(n) => n as usize,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break, // clean EOF
+            Err(e) => return Err(format!("record {i}: read varint: {e}")),
+        };
+
+        // Read exactly rec_len bytes
+        record_buf.resize(rec_len, 0);
+        stdin
+            .read_exact(&mut record_buf)
+            .map_err(|e| format!("record {i}: read: {e}"))?;
+
+        // Ensure output buffer is large enough
+        let out_cap = rec_len * 2 + 256;
+        if output_buf.len() < out_cap {
+            output_buf.resize(out_cap, 0);
+        }
+
         match mode {
             QueryMode::Project => {
-                let mut output = vec![0u8; record.len() * 2 + 256];
-                let len = wql_runtime::project(program, record, &mut output)
+                let len = wql_runtime::project(program, &record_buf, &mut output_buf)
                     .map_err(|e| format!("record {i}: project error: {e}"))?;
-                write_delimited_record(&mut stdout, &output[..len])
+                write_delimited_record(&mut stdout, &output_buf[..len])
                     .map_err(|e| format!("write: {e}"))?;
             }
             QueryMode::Filter => {
-                let pass = wql_runtime::filter(program, record)
+                let pass = wql_runtime::filter(program, &record_buf)
                     .map_err(|e| format!("record {i}: filter error: {e}"))?;
                 if pass {
-                    write_delimited_record(&mut stdout, record)
+                    write_delimited_record(&mut stdout, &record_buf)
                         .map_err(|e| format!("write: {e}"))?;
                 }
             }
             QueryMode::Combined => {
-                let mut output = vec![0u8; record.len() * 2 + 256];
-                let result = wql_runtime::project_and_filter(program, record, &mut output)
+                let result = wql_runtime::project_and_filter(program, &record_buf, &mut output_buf)
                     .map_err(|e| format!("record {i}: runtime error: {e}"))?;
                 if let Some(len) = result {
-                    write_delimited_record(&mut stdout, &output[..len])
+                    write_delimited_record(&mut stdout, &output_buf[..len])
                         .map_err(|e| format!("write: {e}"))?;
                 }
             }
         }
+        i += 1;
     }
 
+    stdout.flush().map_err(|e| format!("flush: {e}"))?;
     Ok(ExitCode::SUCCESS)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Varint length-delimited encoding
+// Varint length-delimited I/O
 // ═══════════════════════════════════════════════════════════════════════
 
-fn parse_delimited(mut buf: &[u8]) -> Result<Vec<Vec<u8>>, String> {
-    let mut records = Vec::new();
-    while !buf.is_empty() {
-        let (len, consumed) = decode_varint(buf).ok_or("malformed varint in delimited stream")?;
-        buf = &buf[consumed..];
-        #[allow(clippy::cast_possible_truncation)]
-        let len = len as usize;
-        if buf.len() < len {
-            return Err(format!(
-                "truncated record: expected {len} bytes, got {}",
-                buf.len()
-            ));
-        }
-        records.push(buf[..len].to_vec());
-        buf = &buf[len..];
-    }
-    Ok(records)
-}
-
-fn decode_varint(buf: &[u8]) -> Option<(u64, usize)> {
+/// Read a varint from a byte stream. Returns `UnexpectedEof` at clean EOF
+/// (no bytes read), or `InvalidData` on a truncated/malformed varint.
+fn read_varint_from(r: &mut impl Read) -> io::Result<u64> {
     let mut val: u64 = 0;
-    let mut shift = 0;
-    for (i, &b) in buf.iter().enumerate() {
-        val |= u64::from(b & 0x7F) << shift;
-        if b & 0x80 == 0 {
-            return Some((val, i + 1));
+    let mut shift = 0u32;
+    let mut byte = [0u8; 1];
+
+    loop {
+        match r.read_exact(&mut byte) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof && shift == 0 => {
+                // Clean EOF before any bytes read
+                return Err(e);
+            }
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "truncated varint",
+                ));
+            }
+            Err(e) => return Err(e),
+        }
+        val |= u64::from(byte[0] & 0x7F) << shift;
+        if byte[0] & 0x80 == 0 {
+            return Ok(val);
         }
         shift += 7;
         if shift >= 64 {
-            return None;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "varint overflow",
+            ));
         }
     }
-    None
 }
 
-fn encode_varint(val: u64) -> Vec<u8> {
-    let mut buf = Vec::new();
-    let mut v = val;
+fn write_delimited_record(w: &mut impl Write, record: &[u8]) -> io::Result<()> {
+    let mut len_buf = [0u8; 10];
+    let mut v = record.len() as u64;
+    let mut i = 0;
     loop {
         let mut byte = (v & 0x7F) as u8;
         v >>= 7;
         if v != 0 {
             byte |= 0x80;
         }
-        buf.push(byte);
+        len_buf[i] = byte;
+        i += 1;
         if v == 0 {
             break;
         }
     }
-    buf
-}
-
-fn write_delimited_record(w: &mut impl Write, record: &[u8]) -> io::Result<()> {
-    let len_bytes = encode_varint(record.len() as u64);
-    w.write_all(&len_bytes)?;
+    w.write_all(&len_buf[..i])?;
     w.write_all(record)?;
     Ok(())
 }
