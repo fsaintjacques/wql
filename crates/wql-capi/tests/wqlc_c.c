@@ -150,7 +150,13 @@ static int eval_single(const wql_program_t *prog, query_mode_t mode) {
         return 2;
     }
 
-    /* Projection output <= input size. Generous headroom for test data. */
+    /* Projection output <= input size. Generous headroom for test data.
+       Guard against overflow on huge inputs. */
+    if (input_len > SIZE_MAX / 2 - 128) {
+        fprintf(stderr, "wqlc_c: input too large\n");
+        free(input);
+        return 2;
+    }
     size_t out_cap = input_len * 2 + 256;
     uint8_t *output = malloc(out_cap);
     if (!output) { fprintf(stderr, "wqlc_c: out of memory\n"); free(input); return 2; }
@@ -201,7 +207,12 @@ static int eval_delimited(const wql_program_t *prog, query_mode_t mode) {
             return 2;
         }
 
-        /* Grow output buffer if needed */
+        /* Grow output buffer if needed (guard against overflow) */
+        if ((size_t)rec_len > SIZE_MAX / 2 - 128) {
+            fprintf(stderr, "wqlc_c: record too large\n");
+            free(record); free(output);
+            return 2;
+        }
         size_t needed = (size_t)rec_len * 2 + 256;
         if (needed > out_cap) {
             out_cap = needed;

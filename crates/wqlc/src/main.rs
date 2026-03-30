@@ -192,10 +192,15 @@ fn eval_delimited(
             .read_exact(&mut record_buf)
             .map_err(|e| format!("record {i}: read: {e}"))?;
 
-        // Ensure output buffer is large enough
-        let out_cap = rec_len * 2 + 256;
-        if output_buf.len() < out_cap {
-            output_buf.resize(out_cap, 0);
+        // Ensure output buffer is large enough (only needed for project/combined)
+        if !matches!(mode, QueryMode::Filter) {
+            let out_cap = rec_len
+                .checked_mul(2)
+                .and_then(|n| n.checked_add(256))
+                .ok_or_else(|| format!("record {i}: too large"))?;
+            if output_buf.len() < out_cap {
+                output_buf.resize(out_cap, 0);
+            }
         }
 
         match mode {

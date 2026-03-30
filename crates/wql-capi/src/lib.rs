@@ -78,7 +78,7 @@ pub unsafe extern "C" fn wql_compile_with_schema(
             let schema = if schema_ptr.is_null() {
                 None
             } else {
-                Some(unsafe { safe_slice(schema_ptr, schema_len) })
+                Some(unsafe { safe_slice(schema_ptr, schema_len) }?)
             };
 
             let root_msg = if root_message.is_null() {
@@ -135,7 +135,7 @@ pub unsafe extern "C" fn wql_program_load(
 ) -> *mut wql_program_t {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> Result<Box<wql_program_t>, String> {
-            let buf = unsafe { safe_slice(bytecode, len) };
+            let buf = unsafe { safe_slice(bytecode, len) }?;
             let program =
                 wql_runtime::LoadedProgram::from_bytes(buf).map_err(|e| format!("{e}"))?;
             Ok(Box::new(wql_program_t { inner: program }))
@@ -190,7 +190,7 @@ pub unsafe extern "C" fn wql_filter(
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<bool, String> {
             let prog = unsafe { &(*program).inner };
-            let input_buf = unsafe { safe_slice(input, input_len) };
+            let input_buf = unsafe { safe_slice(input, input_len) }?;
             wql_runtime::filter(prog, input_buf).map_err(|e| format!("{e}"))
         }));
 
@@ -231,8 +231,8 @@ pub unsafe extern "C" fn wql_project(
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<usize, String> {
             let prog = unsafe { &(*program).inner };
-            let input_buf = unsafe { safe_slice(input, input_len) };
-            let output_buf = unsafe { safe_slice_mut(output, output_len) };
+            let input_buf = unsafe { safe_slice(input, input_len) }?;
+            let output_buf = unsafe { safe_slice_mut(output, output_len) }?;
             wql_runtime::project(prog, input_buf, output_buf).map_err(|e| format!("{e}"))
         }));
 
@@ -275,8 +275,8 @@ pub unsafe extern "C" fn wql_project_and_filter(
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> Result<Option<usize>, String> {
             let prog = unsafe { &(*program).inner };
-            let input_buf = unsafe { safe_slice(input, input_len) };
-            let output_buf = unsafe { safe_slice_mut(output, output_len) };
+            let input_buf = unsafe { safe_slice(input, input_len) }?;
+            let output_buf = unsafe { safe_slice_mut(output, output_len) }?;
             wql_runtime::project_and_filter(prog, input_buf, output_buf).map_err(|e| format!("{e}"))
         },
     ));
@@ -328,21 +328,27 @@ pub unsafe extern "C" fn wql_errmsg_free(msg: *mut std::ffi::c_char) {
 // Internal helpers
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Safe slice from a C pointer + length. Returns an empty slice if ptr is null or len is 0.
-unsafe fn safe_slice<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
-    if ptr.is_null() || len == 0 {
-        &[]
+/// Safe slice from a C pointer + length. Returns an empty slice for len=0.
+/// Returns Err if ptr is null but len > 0 (caller bug).
+unsafe fn safe_slice<'a>(ptr: *const u8, len: usize) -> Result<&'a [u8], String> {
+    if len == 0 {
+        Ok(&[])
+    } else if ptr.is_null() {
+        Err("null pointer with non-zero length".into())
     } else {
-        unsafe { slice::from_raw_parts(ptr, len) }
+        Ok(unsafe { slice::from_raw_parts(ptr, len) })
     }
 }
 
 /// Safe mutable slice from a C pointer + length.
-unsafe fn safe_slice_mut<'a>(ptr: *mut u8, len: usize) -> &'a mut [u8] {
-    if ptr.is_null() || len == 0 {
-        &mut []
+/// Returns Err if ptr is null but len > 0 (caller bug).
+unsafe fn safe_slice_mut<'a>(ptr: *mut u8, len: usize) -> Result<&'a mut [u8], String> {
+    if len == 0 {
+        Ok(&mut [])
+    } else if ptr.is_null() {
+        Err("null output pointer with non-zero length".into())
     } else {
-        unsafe { slice::from_raw_parts_mut(ptr, len) }
+        Ok(unsafe { slice::from_raw_parts_mut(ptr, len) })
     }
 }
 
