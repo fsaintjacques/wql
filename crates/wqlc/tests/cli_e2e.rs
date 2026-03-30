@@ -202,9 +202,15 @@ fn decode_delimited_stream(mut buf: &[u8]) -> Vec<Vec<u8>> {
                 break;
             }
             shift += 7;
+            assert!(shift < 64, "varint overflow in delimited stream");
         }
         buf = &buf[consumed..];
         let len = val as usize;
+        assert!(
+            buf.len() >= len,
+            "truncated record: expected {len} bytes, got {}",
+            buf.len()
+        );
         records.push(buf[..len].to_vec());
         buf = &buf[len..];
     }
@@ -276,16 +282,18 @@ fn cli_eval_delimited_e2e() {
             }
         };
 
-        if !output.status.success() && !output.stderr.is_empty() {
+        if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // Compile errors are expected for some test formats, but
-            // the e2e.txt doesn't include error test cases, so this is a real failure.
             failed.push(format!(
                 "  line {}: {:?} exited {}: {}",
                 case.line,
                 case.query,
                 output.status,
-                stderr.trim()
+                if stderr.is_empty() {
+                    "(no stderr)"
+                } else {
+                    stderr.trim()
+                }
             ));
             continue;
         }

@@ -69,7 +69,7 @@ Examples:
 // ═══════════════════════════════════════════════════════════════════════
 
 fn cmd_compile(args: &[String]) -> Result<ExitCode, String> {
-    let opts = parse_common_opts(args)?;
+    let opts = parse_common_opts(args, false)?;
     let query = opts.query.ok_or("missing -q <query>")?;
     let output_path = opts.output.as_deref();
 
@@ -94,16 +94,17 @@ fn cmd_compile(args: &[String]) -> Result<ExitCode, String> {
 // ═══════════════════════════════════════════════════════════════════════
 
 fn cmd_eval(args: &[String]) -> Result<ExitCode, String> {
-    let opts = parse_common_opts(args)?;
-    let query = opts.query.ok_or("missing -q <query>")?;
+    let opts = parse_common_opts(args, true)?;
+    let query_str = opts.query.ok_or("missing -q <query>")?;
+
+    // Classify mode from the parsed AST, not string matching.
+    let mode = classify_query(&query_str)?;
 
     let compile_opts = build_compile_opts(opts.schema_bytes.as_deref(), opts.message.as_deref());
-    let bytecode =
-        wql_compiler::compile(&query, &compile_opts).map_err(|e| format!("compile error: {e}"))?;
+    let bytecode = wql_compiler::compile(&query_str, &compile_opts)
+        .map_err(|e| format!("compile error: {e}"))?;
     let program = wql_runtime::LoadedProgram::from_bytes(&bytecode)
         .map_err(|e| format!("load error: {e}"))?;
-
-    let mode = classify_query(&query);
 
     if opts.delimited {
         eval_delimited(&program, mode)
@@ -119,14 +120,13 @@ enum QueryMode {
     Combined,
 }
 
-fn classify_query(query: &str) -> QueryMode {
-    if query.contains("WHERE") && query.contains("SELECT") {
-        QueryMode::Combined
-    } else if query.contains('{') {
-        QueryMode::Project
-    } else {
-        QueryMode::Filter
-    }
+fn classify_query(source: &str) -> Result<QueryMode, String> {
+    let ast = wql_compiler::parse(source).map_err(|e| format!("parse error: {e}"))?;
+    Ok(match ast {
+        wql_compiler::ast::Query::Projection(_) => QueryMode::Project,
+        wql_compiler::ast::Query::Predicate(_) => QueryMode::Filter,
+        wql_compiler::ast::Query::Combined { .. } => QueryMode::Combined,
+    })
 }
 
 fn eval_single(program: &wql_runtime::LoadedProgram, mode: QueryMode) -> Result<ExitCode, String> {
@@ -396,7 +396,7 @@ struct Opts {
     delimited: bool,
 }
 
-fn parse_common_opts(args: &[String]) -> Result<Opts, String> {
+fn parse_common_opts(args: &[String], allow_delimited: bool) -> Result<Opts, String> {
     let mut query = None;
     let mut schema_path = None;
     let mut message = None;
@@ -422,7 +422,12 @@ fn parse_common_opts(args: &[String]) -> Result<Opts, String> {
                 i += 1;
                 output = Some(args.get(i).ok_or("missing value for -o")?.clone());
             }
-            "--delimited" => delimited = true,
+            "--delimited" => {
+                if !allow_delimited {
+                    return Err("--delimited is only supported with 'eval'".into());
+                }
+                delimited = true;
+            }
             other => return Err(format!("unknown option '{other}'")),
         }
         i += 1;
