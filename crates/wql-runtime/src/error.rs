@@ -13,6 +13,9 @@ pub enum RuntimeError {
     Decode(wql_ir::DecodeError),
     /// FRAME nesting exceeded the program's declared `max_frame_depth`.
     FrameDepthExceeded,
+    /// Program uses an instruction not supported by this build (e.g. `BYTES_MATCHES`
+    /// without the `regex` feature).
+    UnsupportedInstruction,
 }
 
 impl fmt::Display for RuntimeError {
@@ -23,6 +26,9 @@ impl fmt::Display for RuntimeError {
             Self::StackUnderflow => f.write_str("bool stack underflow"),
             Self::Decode(e) => write!(f, "program decode error: {e}"),
             Self::FrameDepthExceeded => f.write_str("frame depth exceeded"),
+            Self::UnsupportedInstruction => {
+                f.write_str("program uses an unsupported instruction")
+            }
         }
     }
 }

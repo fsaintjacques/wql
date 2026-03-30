@@ -207,7 +207,7 @@ impl<'a> Vm<'a> {
 
                 #[cfg(feature = "regex")]
                 Instruction::BytesMatches { .. } => {
-                    panic!("BYTES_MATCHES not implemented");
+                    return Err(RuntimeError::UnsupportedInstruction);
                 }
 
                 // ── Predicate: set / existence ──
@@ -257,6 +257,13 @@ impl<'a> Vm<'a> {
     }
 
     /// Decode a wire field value into a register.
+    ///
+    /// If the value bytes are malformed (e.g. truncated varint), the register
+    /// is left unset. This is intentional: the wire scanner already validated
+    /// field boundaries, so a decode failure here means the field content is
+    /// not interpretable under the requested encoding. Predicate instructions
+    /// treat unset registers as non-matching (except `IsSet` → false,
+    /// `CmpNeq` → true), which is the correct behavior for a mistyped decode.
     #[allow(clippy::cast_possible_wrap)] // intentional u64→i64 reinterpret for varint/zigzag
     fn decode_field(&mut self, field: &WireField<'_>, reg: u8, encoding: Encoding) {
         if reg as usize >= self.registers.len() {
