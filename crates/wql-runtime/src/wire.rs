@@ -16,6 +16,9 @@ pub(crate) struct WireField<'a> {
     /// For LEN fields: payload bytes only (excludes length prefix).
     /// For non-LEN fields: empty slice.
     pub len_payload: &'a [u8],
+    /// Contiguous tag + value bytes — the entire field as a single slice.
+    /// Used by COPY to do a single memcpy instead of two.
+    pub raw_bytes: &'a [u8],
 }
 
 /// Read a varint from `buf` starting at `pos`. Returns `(value, bytes_consumed)`.
@@ -123,6 +126,7 @@ impl<'a> WireScanner<'a> {
                     wire_type,
                     value_bytes: &self.buf[value_start..self.pos],
                     len_payload: &self.buf[payload_start..self.pos],
+                    raw_bytes: &self.buf[tag_start..self.pos],
                 });
             }
         }
@@ -133,6 +137,7 @@ impl<'a> WireScanner<'a> {
             wire_type,
             value_bytes: &self.buf[value_start..self.pos],
             len_payload: &[],
+            raw_bytes: &self.buf[tag_start..self.pos],
         })
     }
 }

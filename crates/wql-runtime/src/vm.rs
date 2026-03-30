@@ -5,20 +5,25 @@ use wql_ir::{ArmAction, ArmMatch, DefaultAction, Encoding, Instruction, WireType
 /// Hard cap on frame nesting to guard against malformed programs.
 const MAX_FRAME_DEPTH_CAP: u8 = 64;
 
-/// Decoded register value.
+/// Decoded register value. Borrows bytes directly from the input buffer
+/// to avoid per-field heap allocation on the hot path.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum RegisterValue {
+pub(crate) enum RegisterValue<'input> {
     Int(i64),
-    Bytes(alloc::vec::Vec<u8>),
+    Bytes(&'input [u8]),
 }
 
-pub(crate) struct Vm<'a> {
-    instructions: &'a [Instruction],
-    label_table: &'a [usize],
+pub(crate) struct Vm<'prog, 'input> {
+    instructions: &'prog [Instruction],
+    label_table: &'prog [usize],
     max_frame_depth: u8,
 
-    /// R0–R15. None = not set.
-    registers: [Option<RegisterValue>; 16],
+    /// R0–R15. Bytes values borrow from the input buffer.
+    /// Use `presence` bitmask to check whether a register has been written.
+    registers: [RegisterValue<'input>; 16],
+
+    /// Bit N is set if register N was written by a DECODE instruction.
+    presence: u16,
 
     /// Predicate bool stack.
     bool_stack: alloc::vec::Vec<bool>,
@@ -27,25 +32,36 @@ pub(crate) struct Vm<'a> {
     frame_depth: u8,
 }
 
-impl<'a> Vm<'a> {
+/// Default initialization for registers: Int(0), matching proto3 zero-value semantics.
+const ZERO_REG: RegisterValue<'static> = RegisterValue::Int(0);
+const INIT_REGISTERS: [RegisterValue<'static>; 16] = [ZERO_REG; 16];
+
+impl<'prog, 'input> Vm<'prog, 'input> {
     pub fn new(
-        instructions: &'a [Instruction],
-        label_table: &'a [usize],
+        instructions: &'prog [Instruction],
+        label_table: &'prog [usize],
         max_frame_depth: u8,
     ) -> Self {
         Self {
             instructions,
             label_table,
             max_frame_depth: max_frame_depth.min(MAX_FRAME_DEPTH_CAP),
-            registers: Default::default(),
+            registers: INIT_REGISTERS,
+            presence: 0,
             bool_stack: alloc::vec::Vec::new(),
             frame_depth: 0,
         }
     }
 
-    /// Get a register value, returning `None` for out-of-bounds indices.
-    fn reg(&self, idx: u8) -> Option<&RegisterValue> {
-        self.registers.get(idx as usize).and_then(|r| r.as_ref())
+    /// Get a register value. Returns the value regardless of presence;
+    /// callers that need presence semantics should check `is_set()`.
+    fn reg(&self, idx: u8) -> &RegisterValue<'input> {
+        &self.registers[idx as usize]
+    }
+
+    /// Check whether a register was written by a DECODE instruction.
+    fn is_set(&self, idx: u8) -> bool {
+        idx < 16 && self.presence & (1 << idx) != 0
     }
 
     /// Execute starting at `start_pc` over the given input window,
@@ -55,7 +71,7 @@ impl<'a> Vm<'a> {
     pub fn execute(
         &mut self,
         start_pc: usize,
-        input: &[u8],
+        input: &'input [u8],
         output: &mut [u8],
         output_cursor: usize,
     ) -> Result<(bool, usize), RuntimeError> {
@@ -117,87 +133,70 @@ impl<'a> Vm<'a> {
 
                 // ── Predicate: integer comparisons ──
                 Instruction::CmpEq { reg, imm } => {
-                    let result = matches!(
-                        self.reg(*reg),
-                        Some(RegisterValue::Int(v)) if *v == *imm
-                    );
+                    let result =
+                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Int(v) if *v == *imm);
                     self.bool_stack.push(result);
                     pc += 1;
                 }
                 Instruction::CmpNeq { reg, imm } => {
-                    let result = match self.reg(*reg) {
-                        Some(RegisterValue::Int(v)) => *v != *imm,
-                        // Unset or type mismatch: not equal.
-                        _ => true,
-                    };
+                    let result = !self.is_set(*reg)
+                        || !matches!(self.reg(*reg), RegisterValue::Int(v) if *v == *imm);
                     self.bool_stack.push(result);
                     pc += 1;
                 }
                 Instruction::CmpLt { reg, imm } => {
-                    let result = matches!(
-                        self.reg(*reg),
-                        Some(RegisterValue::Int(v)) if *v < *imm
-                    );
+                    let result =
+                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Int(v) if *v < *imm);
                     self.bool_stack.push(result);
                     pc += 1;
                 }
                 Instruction::CmpLte { reg, imm } => {
-                    let result = matches!(
-                        self.reg(*reg),
-                        Some(RegisterValue::Int(v)) if *v <= *imm
-                    );
+                    let result =
+                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Int(v) if *v <= *imm);
                     self.bool_stack.push(result);
                     pc += 1;
                 }
                 Instruction::CmpGt { reg, imm } => {
-                    let result = matches!(
-                        self.reg(*reg),
-                        Some(RegisterValue::Int(v)) if *v > *imm
-                    );
+                    let result =
+                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Int(v) if *v > *imm);
                     self.bool_stack.push(result);
                     pc += 1;
                 }
                 Instruction::CmpGte { reg, imm } => {
-                    let result = matches!(
-                        self.reg(*reg),
-                        Some(RegisterValue::Int(v)) if *v >= *imm
-                    );
+                    let result =
+                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Int(v) if *v >= *imm);
                     self.bool_stack.push(result);
                     pc += 1;
                 }
 
                 // ── Predicate: bytes comparisons ──
                 Instruction::CmpLenEq { reg, bytes } => {
-                    let result = matches!(
-                        self.reg(*reg),
-                        Some(RegisterValue::Bytes(v)) if v == bytes
-                    );
+                    let result =
+                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Bytes(v) if *v == bytes.as_slice());
                     self.bool_stack.push(result);
                     pc += 1;
                 }
                 Instruction::BytesStarts { reg, bytes } => {
-                    let result = matches!(
-                        self.reg(*reg),
-                        Some(RegisterValue::Bytes(v)) if v.starts_with(bytes)
-                    );
+                    let result =
+                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Bytes(v) if v.starts_with(bytes));
                     self.bool_stack.push(result);
                     pc += 1;
                 }
                 Instruction::BytesEnds { reg, bytes } => {
-                    let result = matches!(
-                        self.reg(*reg),
-                        Some(RegisterValue::Bytes(v)) if v.ends_with(bytes)
-                    );
+                    let result =
+                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Bytes(v) if v.ends_with(bytes));
                     self.bool_stack.push(result);
                     pc += 1;
                 }
                 Instruction::BytesContains { reg, bytes } => {
-                    let result = if bytes.is_empty() {
-                        matches!(self.reg(*reg), Some(RegisterValue::Bytes(_)))
+                    let result = if !self.is_set(*reg) {
+                        false
+                    } else if bytes.is_empty() {
+                        matches!(self.reg(*reg), RegisterValue::Bytes(_))
                     } else {
                         matches!(
                             self.reg(*reg),
-                            Some(RegisterValue::Bytes(v))
+                            RegisterValue::Bytes(v)
                                 if v.windows(bytes.len()).any(|w| w == bytes.as_slice())
                         )
                     };
@@ -212,16 +211,13 @@ impl<'a> Vm<'a> {
 
                 // ── Predicate: set / existence ──
                 Instruction::InSet { reg, values } => {
-                    let result = matches!(
-                        self.reg(*reg),
-                        Some(RegisterValue::Int(v)) if values.contains(v)
-                    );
+                    let result =
+                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Int(v) if values.contains(v));
                     self.bool_stack.push(result);
                     pc += 1;
                 }
                 Instruction::IsSet { reg } => {
-                    let result = self.reg(*reg).is_some();
-                    self.bool_stack.push(result);
+                    self.bool_stack.push(self.is_set(*reg));
                     pc += 1;
                 }
 
@@ -265,8 +261,8 @@ impl<'a> Vm<'a> {
     /// treat unset registers as non-matching (except `IsSet` → false,
     /// `CmpNeq` → true), which is the correct behavior for a mistyped decode.
     #[allow(clippy::cast_possible_wrap)] // intentional u64→i64 reinterpret for varint/zigzag
-    fn decode_field(&mut self, field: &WireField<'_>, reg: u8, encoding: Encoding) {
-        if reg as usize >= self.registers.len() {
+    fn decode_field(&mut self, field: &WireField<'input>, reg: u8, encoding: Encoding) {
+        if reg >= 16 {
             return;
         }
         let value = match encoding {
@@ -307,11 +303,12 @@ impl<'a> Vm<'a> {
                     None
                 }
             }
-            Encoding::Len => Some(RegisterValue::Bytes(field.len_payload.to_vec())),
+            Encoding::Len => Some(RegisterValue::Bytes(field.len_payload)),
         };
 
         if let Some(v) = value {
-            self.registers[reg as usize] = Some(v);
+            self.registers[reg as usize] = v;
+            self.presence |= 1 << reg;
         }
     }
 
@@ -320,7 +317,7 @@ impl<'a> Vm<'a> {
     fn execute_frame(
         &mut self,
         label_idx: u32,
-        field: &WireField<'_>,
+        field: &WireField<'input>,
         output: &mut [u8],
         cursor: usize,
     ) -> Result<usize, RuntimeError> {
@@ -364,20 +361,18 @@ impl<'a> Vm<'a> {
 }
 
 /// Copy a wire field (tag + value) to the output buffer. Returns the new cursor.
+/// Uses a single memcpy via the contiguous `raw_bytes` slice.
 fn copy_field(
     output: &mut [u8],
     cursor: usize,
     field: &WireField<'_>,
 ) -> Result<usize, RuntimeError> {
-    let tag_len = field.tag_bytes.len();
-    let val_len = field.value_bytes.len();
-    let total = tag_len + val_len;
-    let end = cursor + total;
+    let len = field.raw_bytes.len();
+    let end = cursor + len;
     if end > output.len() {
         return Err(RuntimeError::OutputBufferTooSmall);
     }
-    output[cursor..cursor + tag_len].copy_from_slice(field.tag_bytes);
-    output[cursor + tag_len..end].copy_from_slice(field.value_bytes);
+    output[cursor..end].copy_from_slice(field.raw_bytes);
     Ok(end)
 }
 
