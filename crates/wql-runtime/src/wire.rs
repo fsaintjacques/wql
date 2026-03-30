@@ -85,8 +85,7 @@ impl<'a> WireScanner<'a> {
         self.pos += tag_len;
 
         let wire_type_raw = (tag & 0x07) as u8;
-        let field_num =
-            u32::try_from(tag >> 3).map_err(|_| RuntimeError::MalformedInput)?;
+        let field_num = u32::try_from(tag >> 3).map_err(|_| RuntimeError::MalformedInput)?;
         let wire_type = WireType::from_u8(wire_type_raw).ok_or(RuntimeError::MalformedInput)?;
 
         let tag_bytes = &self.buf[tag_start..self.pos];
@@ -111,8 +110,7 @@ impl<'a> WireScanner<'a> {
             }
             WireType::Len => {
                 let (len, len_varint_size) = read_varint(self.buf, self.pos)?;
-                let len =
-                    usize::try_from(len).map_err(|_| RuntimeError::MalformedInput)?;
+                let len = usize::try_from(len).map_err(|_| RuntimeError::MalformedInput)?;
                 let payload_start = self.pos + len_varint_size;
                 if payload_start + len > self.buf.len() {
                     return Err(RuntimeError::MalformedInput);

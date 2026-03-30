@@ -1,6 +1,6 @@
 use crate::error::RuntimeError;
-use crate::wire::{WireField, WireScanner};
-use wql_ir::{ArmAction, ArmMatch, DefaultAction, Instruction, WireType};
+use crate::wire::{self, WireField, WireScanner};
+use wql_ir::{ArmAction, ArmMatch, DefaultAction, Encoding, Instruction, WireType};
 
 /// Hard cap on frame nesting to guard against malformed programs.
 const MAX_FRAME_DEPTH_CAP: u8 = 64;
@@ -43,9 +43,15 @@ impl<'a> Vm<'a> {
         }
     }
 
+    /// Get a register value, returning `None` for out-of-bounds indices.
+    fn reg(&self, idx: u8) -> Option<&RegisterValue> {
+        self.registers.get(idx as usize).and_then(|r| r.as_ref())
+    }
+
     /// Execute starting at `start_pc` over the given input window,
     /// writing to `output` at `output_cursor`.
     /// Returns `(predicate, output_bytes_written)`.
+    #[allow(clippy::too_many_lines)]
     pub fn execute(
         &mut self,
         start_pc: usize,
@@ -78,15 +84,13 @@ impl<'a> Vm<'a> {
                                         cursor = copy_field(output, cursor, &field)?;
                                     }
                                     ArmAction::Frame(label_idx) => {
-                                        cursor = self.execute_frame(
-                                            *label_idx,
-                                            &field,
-                                            output,
-                                            cursor,
-                                        )?;
+                                        cursor =
+                                            self.execute_frame(*label_idx, &field, output, cursor)?;
                                     }
-                                    // Skip and Decode (chunk 3d) produce no output.
-                                    ArmAction::Skip | ArmAction::Decode { .. } => {}
+                                    ArmAction::Skip => {}
+                                    ArmAction::Decode { reg, encoding } => {
+                                        self.decode_field(&field, *reg, *encoding);
+                                    }
                                 }
                             }
                         } else {
@@ -97,14 +101,9 @@ impl<'a> Vm<'a> {
                                 DefaultAction::Skip => {}
                                 DefaultAction::Recurse(label_idx) => {
                                     if field.wire_type == WireType::Len {
-                                        cursor = self.execute_frame(
-                                            *label_idx,
-                                            &field,
-                                            output,
-                                            cursor,
-                                        )?;
+                                        cursor =
+                                            self.execute_frame(*label_idx, &field, output, cursor)?;
                                     }
-                                    // Non-LEN fields are skipped.
                                 }
                             }
                         }
@@ -115,7 +114,137 @@ impl<'a> Vm<'a> {
                     let predicate = self.bool_stack.last().copied().unwrap_or(true);
                     return Ok((predicate, cursor - output_cursor));
                 }
-                // Label, predicates, and other instructions — advance PC.
+
+                // ── Predicate: integer comparisons ──
+                Instruction::CmpEq { reg, imm } => {
+                    let result = matches!(
+                        self.reg(*reg),
+                        Some(RegisterValue::Int(v)) if *v == *imm
+                    );
+                    self.bool_stack.push(result);
+                    pc += 1;
+                }
+                Instruction::CmpNeq { reg, imm } => {
+                    let result = match self.reg(*reg) {
+                        Some(RegisterValue::Int(v)) => *v != *imm,
+                        // Unset or type mismatch: not equal.
+                        _ => true,
+                    };
+                    self.bool_stack.push(result);
+                    pc += 1;
+                }
+                Instruction::CmpLt { reg, imm } => {
+                    let result = matches!(
+                        self.reg(*reg),
+                        Some(RegisterValue::Int(v)) if *v < *imm
+                    );
+                    self.bool_stack.push(result);
+                    pc += 1;
+                }
+                Instruction::CmpLte { reg, imm } => {
+                    let result = matches!(
+                        self.reg(*reg),
+                        Some(RegisterValue::Int(v)) if *v <= *imm
+                    );
+                    self.bool_stack.push(result);
+                    pc += 1;
+                }
+                Instruction::CmpGt { reg, imm } => {
+                    let result = matches!(
+                        self.reg(*reg),
+                        Some(RegisterValue::Int(v)) if *v > *imm
+                    );
+                    self.bool_stack.push(result);
+                    pc += 1;
+                }
+                Instruction::CmpGte { reg, imm } => {
+                    let result = matches!(
+                        self.reg(*reg),
+                        Some(RegisterValue::Int(v)) if *v >= *imm
+                    );
+                    self.bool_stack.push(result);
+                    pc += 1;
+                }
+
+                // ── Predicate: bytes comparisons ──
+                Instruction::CmpLenEq { reg, bytes } => {
+                    let result = matches!(
+                        self.reg(*reg),
+                        Some(RegisterValue::Bytes(v)) if v == bytes
+                    );
+                    self.bool_stack.push(result);
+                    pc += 1;
+                }
+                Instruction::BytesStarts { reg, bytes } => {
+                    let result = matches!(
+                        self.reg(*reg),
+                        Some(RegisterValue::Bytes(v)) if v.starts_with(bytes)
+                    );
+                    self.bool_stack.push(result);
+                    pc += 1;
+                }
+                Instruction::BytesEnds { reg, bytes } => {
+                    let result = matches!(
+                        self.reg(*reg),
+                        Some(RegisterValue::Bytes(v)) if v.ends_with(bytes)
+                    );
+                    self.bool_stack.push(result);
+                    pc += 1;
+                }
+                Instruction::BytesContains { reg, bytes } => {
+                    let result = if bytes.is_empty() {
+                        matches!(self.reg(*reg), Some(RegisterValue::Bytes(_)))
+                    } else {
+                        matches!(
+                            self.reg(*reg),
+                            Some(RegisterValue::Bytes(v))
+                                if v.windows(bytes.len()).any(|w| w == bytes.as_slice())
+                        )
+                    };
+                    self.bool_stack.push(result);
+                    pc += 1;
+                }
+
+                #[cfg(feature = "regex")]
+                Instruction::BytesMatches { .. } => {
+                    panic!("BYTES_MATCHES not implemented");
+                }
+
+                // ── Predicate: set / existence ──
+                Instruction::InSet { reg, values } => {
+                    let result = matches!(
+                        self.reg(*reg),
+                        Some(RegisterValue::Int(v)) if values.contains(v)
+                    );
+                    self.bool_stack.push(result);
+                    pc += 1;
+                }
+                Instruction::IsSet { reg } => {
+                    let result = self.reg(*reg).is_some();
+                    self.bool_stack.push(result);
+                    pc += 1;
+                }
+
+                // ── Logic ──
+                Instruction::And => {
+                    let b = self.bool_stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                    let a = self.bool_stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                    self.bool_stack.push(a && b);
+                    pc += 1;
+                }
+                Instruction::Or => {
+                    let b = self.bool_stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                    let a = self.bool_stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                    self.bool_stack.push(a || b);
+                    pc += 1;
+                }
+                Instruction::Not => {
+                    let a = self.bool_stack.pop().ok_or(RuntimeError::StackUnderflow)?;
+                    self.bool_stack.push(!a);
+                    pc += 1;
+                }
+
+                // Label, Copy, Skip, Decode outside of Dispatch — advance PC.
                 _ => {
                     pc += 1;
                 }
@@ -125,6 +254,58 @@ impl<'a> Vm<'a> {
         // Implicit return at end of instruction stream.
         let predicate = self.bool_stack.last().copied().unwrap_or(true);
         Ok((predicate, cursor - output_cursor))
+    }
+
+    /// Decode a wire field value into a register.
+    #[allow(clippy::cast_possible_wrap)] // intentional u64→i64 reinterpret for varint/zigzag
+    fn decode_field(&mut self, field: &WireField<'_>, reg: u8, encoding: Encoding) {
+        if reg as usize >= self.registers.len() {
+            return;
+        }
+        let value = match encoding {
+            Encoding::Varint => wire::read_varint(field.value_bytes, 0)
+                .ok()
+                .map(|(v, _)| RegisterValue::Int(v as i64)),
+            Encoding::Sint => wire::read_varint(field.value_bytes, 0).ok().map(|(n, _)| {
+                let decoded = ((n >> 1) as i64) ^ -((n & 1) as i64);
+                RegisterValue::Int(decoded)
+            }),
+            Encoding::I32 => {
+                if field.value_bytes.len() >= 4 {
+                    let v = i32::from_le_bytes([
+                        field.value_bytes[0],
+                        field.value_bytes[1],
+                        field.value_bytes[2],
+                        field.value_bytes[3],
+                    ]);
+                    Some(RegisterValue::Int(i64::from(v)))
+                } else {
+                    None
+                }
+            }
+            Encoding::I64 => {
+                if field.value_bytes.len() >= 8 {
+                    let v = i64::from_le_bytes([
+                        field.value_bytes[0],
+                        field.value_bytes[1],
+                        field.value_bytes[2],
+                        field.value_bytes[3],
+                        field.value_bytes[4],
+                        field.value_bytes[5],
+                        field.value_bytes[6],
+                        field.value_bytes[7],
+                    ]);
+                    Some(RegisterValue::Int(v))
+                } else {
+                    None
+                }
+            }
+            Encoding::Len => Some(RegisterValue::Bytes(field.len_payload.to_vec())),
+        };
+
+        if let Some(v) = value {
+            self.registers[reg as usize] = Some(v);
+        }
     }
 
     /// Enter a sub-message scope via FRAME. Writes tag + gap-and-shift
@@ -168,10 +349,7 @@ impl<'a> Vm<'a> {
 
         // Shift sub-output left if the varint is shorter than 5 bytes.
         if varint_len < 5 {
-            output.copy_within(
-                sub_start..sub_start + sub_written,
-                tag_end + varint_len,
-            );
+            output.copy_within(sub_start..sub_start + sub_written, tag_end + varint_len);
         }
 
         Ok(tag_end + varint_len + sub_written)
