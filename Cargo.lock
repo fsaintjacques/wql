@@ -767,13 +767,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wql-wasm"
-version = "0.1.0"
-dependencies = [
- "wql-runtime",
-]
-
-[[package]]
 name = "wqlc"
 version = "0.1.0"
 dependencies = [
