@@ -95,6 +95,37 @@
 ----
 {"customer": "Alice", "items": [{"sku": "W-1"}, {"sku": "G-2"}]}
 
+# ── Filter: predicate on repeated field ──
+
+# Filter on a field inside a repeated message: should match if ANY element matches.
+# Order { items: [{sku: "W-1", price: 1999}, {sku: "G-2", price: 4999}] }
+# "items.price > 3000" should be true (G-2 has price 4999).
+
+items.price > 3000
+{"items": [{"sku": "G-2", "quantity": 1, "price": 4999}, {"sku": "W-1", "quantity": 2, "price": 1999}]}
+{"items": [{"sku": "W-1", "quantity": 2, "price": 1999}]}
+----
+true
+false
+
+items.sku == "W-1"
+{"items": [{"sku": "W-1"}, {"sku": "G-2"}]}
+{"items": [{"sku": "G-2"}, {"sku": "W-3"}]}
+----
+true
+false
+
+# Combined: filter on repeated field, project removes the predicated field.
+# This ensures filter and projection are decoupled — the filter checks
+# items.price but the projection strips price from the output.
+
+WHERE items.price > 3000 SELECT { customer, items { sku } }
+{"customer": "Alice", "items": [{"sku": "G-2", "price": 4999}, {"sku": "W-1", "price": 1999}]}
+{"customer": "Bob", "items": [{"sku": "W-1", "price": 500}]}
+----
+{"customer": "Alice", "items": [{"sku": "G-2"}, {"sku": "W-1"}]}
+<none>
+
 # message: testdata.Person
 
 # ── Filter: integer comparisons ──
