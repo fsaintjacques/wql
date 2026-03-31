@@ -602,16 +602,59 @@ fn compute_max_frame_depth(instructions: &[Instruction]) -> u8 {
 }
 
 fn compute_flags(instructions: &[Instruction]) -> u16 {
+    use crate::types::{FLAG_HAS_PREDICATE, FLAG_HAS_PROJECTION};
+
+    let mut flags = 0u16;
+
     #[cfg(feature = "regex")]
     {
         for instr in instructions {
             if matches!(instr, Instruction::BytesMatches { .. }) {
-                return FLAG_REGEX_REQUIRED;
+                flags |= FLAG_REGEX_REQUIRED;
+                break;
             }
         }
     }
-    let _ = instructions;
-    0
+
+    for instr in instructions {
+        match instr {
+            Instruction::Dispatch { default, arms } => {
+                // Projection: default Copy/Recurse, or arms with Copy/Frame
+                if matches!(default, DefaultAction::Copy | DefaultAction::Recurse(_)) {
+                    flags |= FLAG_HAS_PROJECTION;
+                }
+                for arm in arms {
+                    for action in &arm.actions {
+                        match action {
+                            ArmAction::Copy | ArmAction::Frame(_) => {
+                                flags |= FLAG_HAS_PROJECTION;
+                            }
+                            ArmAction::Decode { .. } => flags |= FLAG_HAS_PREDICATE,
+                            ArmAction::Skip => {}
+                        }
+                    }
+                }
+            }
+            Instruction::CmpEq { .. }
+            | Instruction::CmpNeq { .. }
+            | Instruction::CmpLt { .. }
+            | Instruction::CmpLte { .. }
+            | Instruction::CmpGt { .. }
+            | Instruction::CmpGte { .. }
+            | Instruction::CmpLenEq { .. }
+            | Instruction::BytesStarts { .. }
+            | Instruction::BytesEnds { .. }
+            | Instruction::BytesContains { .. }
+            | Instruction::InSet { .. }
+            | Instruction::IsSet { .. }
+            | Instruction::And
+            | Instruction::Or
+            | Instruction::Not => flags |= FLAG_HAS_PREDICATE,
+            _ => {}
+        }
+    }
+
+    flags
 }
 
 /// Encode a sequence of instructions into a complete WVM program binary.
@@ -1500,7 +1543,7 @@ mod tests {
         let (header, _) = decode(&encoded).unwrap();
         assert_eq!(header.version, VERSION);
         assert_eq!(header.register_count, 4); // reg 3 → count = 4
-        assert_eq!(header.flags, 0);
+        assert_eq!(header.flags, 0x0004); // HAS_PREDICATE only (Decode + CmpEq, no Copy/Frame)
     }
 
     #[test]
@@ -1736,7 +1779,7 @@ mod tests {
         let encoded = encode(&instructions);
         let (header, _) = decode(&encoded).unwrap();
         assert_eq!(header.register_count, 1);
-        assert_eq!(header.flags, 0);
+        assert_eq!(header.flags, 0x0004 | 0x0002); // HAS_PREDICATE | HAS_PROJECTION
     }
 
     // ─────────────────────────────── BYTES_MATCHES (regex feature)

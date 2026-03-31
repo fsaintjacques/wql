@@ -211,6 +211,10 @@ pub const VERSION: u16 = 1;
 
 /// Header flag: program contains at least one `BYTES_MATCHES` instruction.
 pub const FLAG_REGEX_REQUIRED: u16 = 0x0001;
+/// Header flag: program contains projection logic (Copy/Frame/Recurse in DISPATCH).
+pub const FLAG_HAS_PROJECTION: u16 = 0x0002;
+/// Header flag: program contains predicate logic (comparison/logic instructions).
+pub const FLAG_HAS_PREDICATE: u16 = 0x0004;
 
 /// Size of the fixed program header in bytes.
 pub const HEADER_SIZE: usize = 14;
@@ -223,6 +227,20 @@ pub struct ProgramHeader {
     pub max_frame_depth: u8,
     pub flags: u16,
     pub bytecode_len: u32,
+}
+
+impl ProgramHeader {
+    /// Program contains projection logic (output bytes are produced).
+    #[must_use]
+    pub fn has_projection(&self) -> bool {
+        self.flags & FLAG_HAS_PROJECTION != 0
+    }
+
+    /// Program contains predicate logic (bool result is produced).
+    #[must_use]
+    pub fn has_predicate(&self) -> bool {
+        self.flags & FLAG_HAS_PREDICATE != 0
+    }
 }
 
 /// A parsed, validated WVM program that borrows its backing byte slice.

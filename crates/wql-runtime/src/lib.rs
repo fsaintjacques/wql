@@ -27,6 +27,12 @@ pub struct LoadedProgram {
 }
 
 impl LoadedProgram {
+    /// Access the program header.
+    #[must_use]
+    pub fn header(&self) -> &ProgramHeader {
+        &self.header
+    }
+
     /// Decode a WVM program from its binary representation.
     ///
     /// # Errors
