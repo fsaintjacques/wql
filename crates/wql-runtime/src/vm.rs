@@ -133,8 +133,8 @@ impl<'prog, 'input> Vm<'prog, 'input> {
 
                 // ── Predicate: integer comparisons ──
                 Instruction::CmpEq { reg, imm } => {
-                    let result =
-                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Int(v) if *v == *imm);
+                    let result = self.is_set(*reg)
+                        && matches!(self.reg(*reg), RegisterValue::Int(v) if *v == *imm);
                     self.bool_stack.push(result);
                     pc += 1;
                 }
@@ -145,46 +145,46 @@ impl<'prog, 'input> Vm<'prog, 'input> {
                     pc += 1;
                 }
                 Instruction::CmpLt { reg, imm } => {
-                    let result =
-                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Int(v) if *v < *imm);
+                    let result = self.is_set(*reg)
+                        && matches!(self.reg(*reg), RegisterValue::Int(v) if *v < *imm);
                     self.bool_stack.push(result);
                     pc += 1;
                 }
                 Instruction::CmpLte { reg, imm } => {
-                    let result =
-                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Int(v) if *v <= *imm);
+                    let result = self.is_set(*reg)
+                        && matches!(self.reg(*reg), RegisterValue::Int(v) if *v <= *imm);
                     self.bool_stack.push(result);
                     pc += 1;
                 }
                 Instruction::CmpGt { reg, imm } => {
-                    let result =
-                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Int(v) if *v > *imm);
+                    let result = self.is_set(*reg)
+                        && matches!(self.reg(*reg), RegisterValue::Int(v) if *v > *imm);
                     self.bool_stack.push(result);
                     pc += 1;
                 }
                 Instruction::CmpGte { reg, imm } => {
-                    let result =
-                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Int(v) if *v >= *imm);
+                    let result = self.is_set(*reg)
+                        && matches!(self.reg(*reg), RegisterValue::Int(v) if *v >= *imm);
                     self.bool_stack.push(result);
                     pc += 1;
                 }
 
                 // ── Predicate: bytes comparisons ──
                 Instruction::CmpLenEq { reg, bytes } => {
-                    let result =
-                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Bytes(v) if *v == bytes.as_slice());
+                    let result = self.is_set(*reg)
+                        && matches!(self.reg(*reg), RegisterValue::Bytes(v) if *v == bytes.as_slice());
                     self.bool_stack.push(result);
                     pc += 1;
                 }
                 Instruction::BytesStarts { reg, bytes } => {
-                    let result =
-                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Bytes(v) if v.starts_with(bytes));
+                    let result = self.is_set(*reg)
+                        && matches!(self.reg(*reg), RegisterValue::Bytes(v) if v.starts_with(bytes));
                     self.bool_stack.push(result);
                     pc += 1;
                 }
                 Instruction::BytesEnds { reg, bytes } => {
-                    let result =
-                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Bytes(v) if v.ends_with(bytes));
+                    let result = self.is_set(*reg)
+                        && matches!(self.reg(*reg), RegisterValue::Bytes(v) if v.ends_with(bytes));
                     self.bool_stack.push(result);
                     pc += 1;
                 }
@@ -211,8 +211,8 @@ impl<'prog, 'input> Vm<'prog, 'input> {
 
                 // ── Predicate: set / existence ──
                 Instruction::InSet { reg, values } => {
-                    let result =
-                        self.is_set(*reg) && matches!(self.reg(*reg), RegisterValue::Int(v) if values.contains(v));
+                    let result = self.is_set(*reg)
+                        && matches!(self.reg(*reg), RegisterValue::Int(v) if values.contains(v));
                     self.bool_stack.push(result);
                     pc += 1;
                 }

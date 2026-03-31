@@ -26,9 +26,7 @@ impl fmt::Display for RuntimeError {
             Self::StackUnderflow => f.write_str("bool stack underflow"),
             Self::Decode(e) => write!(f, "program decode error: {e}"),
             Self::FrameDepthExceeded => f.write_str("frame depth exceeded"),
-            Self::UnsupportedInstruction => {
-                f.write_str("program uses an unsupported instruction")
-            }
+            Self::UnsupportedInstruction => f.write_str("program uses an unsupported instruction"),
         }
     }
 }
