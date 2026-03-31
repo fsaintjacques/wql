@@ -115,6 +115,16 @@ items.sku == "W-1"
 true
 false
 
+# Mixed: nested predicate + top-level predicate
+items.price > 3000 && shipped == true
+{"items": [{"sku": "G-2", "price": 4999}], "shipped": true}
+{"items": [{"sku": "G-2", "price": 4999}], "shipped": false}
+{"items": [{"sku": "W-1", "price": 500}], "shipped": true}
+----
+true
+false
+false
+
 # Combined: filter on repeated field, project removes the predicated field.
 # This ensures filter and projection are decoupled — the filter checks
 # items.price but the projection strips price from the output.
