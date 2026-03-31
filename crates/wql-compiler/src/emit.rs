@@ -353,15 +353,17 @@ fn emit_nested_predicate_dispatches(
         for (&seg, infos) in &by_first {
             let all_leaf = infos.iter().all(|info| info.remaining_path.len() == 1);
             if all_leaf {
-                for info in infos {
-                    arms.push(DispatchArm {
-                        match_: ArmMatch::Field(seg),
-                        actions: vec![ArmAction::Decode {
-                            reg: info.reg,
-                            encoding: info.encoding,
-                        }],
-                    });
-                }
+                let actions: Vec<ArmAction> = infos
+                    .iter()
+                    .map(|info| ArmAction::Decode {
+                        reg: info.reg,
+                        encoding: info.encoding,
+                    })
+                    .collect();
+                arms.push(DispatchArm {
+                    match_: ArmMatch::Field(seg),
+                    actions,
+                });
             } else {
                 let label = emitter.alloc_label();
                 arms.push(DispatchArm {
@@ -389,9 +391,10 @@ fn emit_nested_predicate_dispatches(
             arms,
         });
 
-        // Emit predicate logic for fields decoded in this Frame, then Or
-        // to accumulate across repeated element invocations (ANY semantics).
-        emit_predicate_logic(emitter, pred, field_map, false)?;
+        // Emit only the predicate leaves whose registers are decoded in this Frame,
+        // then Or to accumulate across repeated element invocations (ANY semantics).
+        let local_regs: Vec<u8> = nested.fields.iter().map(|f| f.reg).collect();
+        emit_predicate_leaves_for_regs(emitter, pred, field_map, &local_regs)?;
         emitter.push(Instruction::Or);
 
         emitter.push(Instruction::Return);
@@ -401,6 +404,67 @@ fn emit_nested_predicate_dispatches(
         }
     }
     Ok(())
+}
+
+/// Emit only the predicate leaf comparisons whose registers are in `regs`.
+/// For compound predicates (And/Or/Not), emits the sub-tree only if it
+/// contains relevant leaves. Returns true if anything was emitted.
+fn emit_predicate_leaves_for_regs(
+    emitter: &mut Emitter,
+    pred: &BoundPredicate,
+    field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
+    regs: &[u8],
+) -> Result<bool, CompileError> {
+    match &pred.kind {
+        BoundPredicateKind::And(l, r) => {
+            let left = emit_predicate_leaves_for_regs(emitter, l, field_map, regs)?;
+            let right = emit_predicate_leaves_for_regs(emitter, r, field_map, regs)?;
+            if left && right {
+                emitter.push(Instruction::And);
+            }
+            Ok(left || right)
+        }
+        BoundPredicateKind::Or(l, r) => {
+            let left = emit_predicate_leaves_for_regs(emitter, l, field_map, regs)?;
+            let right = emit_predicate_leaves_for_regs(emitter, r, field_map, regs)?;
+            if left && right {
+                emitter.push(Instruction::Or);
+            }
+            Ok(left || right)
+        }
+        BoundPredicateKind::Not(inner) => {
+            let inner_emitted = emit_predicate_leaves_for_regs(emitter, inner, field_map, regs)?;
+            if inner_emitted {
+                emitter.push(Instruction::Not);
+            }
+            Ok(inner_emitted)
+        }
+        _ => {
+            let reg = predicate_leaf_reg(pred, field_map);
+            if let Some(r) = reg {
+                if regs.contains(&r) {
+                    emit_predicate_logic(emitter, pred, field_map, false)?;
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+    }
+}
+
+/// Get the register used by a predicate leaf, if any.
+fn predicate_leaf_reg(
+    pred: &BoundPredicate,
+    field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
+) -> Option<u8> {
+    let segments = match &pred.kind {
+        BoundPredicateKind::Comparison { field, .. }
+        | BoundPredicateKind::Presence(field)
+        | BoundPredicateKind::InSet { field, .. }
+        | BoundPredicateKind::StringPredicate { field, .. } => &field.segments,
+        _ => return None,
+    };
+    field_map.get(segments).map(|info| info.reg)
 }
 
 /// Check if a predicate leaf references a multi-segment (nested) field.
@@ -865,8 +929,9 @@ fn emit_combined_nested_projection(
 
     emitter.push(Instruction::Dispatch { default, arms });
 
-    // Emit predicate logic inside the Frame for repeated field ANY semantics.
-    emit_predicate_logic(emitter, pred, field_map, false)?;
+    // Emit only the predicate leaves for registers decoded in this Frame.
+    let local_regs: Vec<u8> = pred_fields.iter().map(|f| f.reg).collect();
+    emit_predicate_leaves_for_regs(emitter, pred, field_map, &local_regs)?;
     emitter.push(Instruction::Or);
 
     emitter.push(Instruction::Return);
