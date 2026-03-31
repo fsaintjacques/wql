@@ -98,6 +98,10 @@ int32_t wql_filter(const struct wql_program_t *program,
  * Returns the number of bytes written to `output`, or -1 on error.
  * If the output buffer is too small, returns -1 and sets `*errmsg`.
  *
+ * **Buffer sizing:** projection output is always <= `input_len` bytes
+ * (fields are stripped, never added). Passing `output_len >= input_len`
+ * guarantees the buffer is large enough.
+ *
  * # Safety
  *
  * - `program` must be a valid pointer from `wql_program_load`.
@@ -119,6 +123,8 @@ int64_t wql_project(const struct wql_program_t *program,
  * -  `>= 0`: record passed; value is bytes written to `output`.
  * -  `-1`: record was filtered out (not an error).
  * -  `-2`: error; `*errmsg` is set.
+ *
+ * **Buffer sizing:** see `wql_project` — `output_len >= input_len` is sufficient.
  *
  * # Safety
  *
