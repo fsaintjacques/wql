@@ -240,7 +240,7 @@ fn project_flat_preserve_unknowns() {
         proto_varint(2, 20),
         proto_varint(3, 30),
     ]);
-    let output = run_project("{ #1, ... }", &input);
+    let output = run_project("{ #1, .. }", &input);
 
     // All fields should be present (unknowns preserved)
     assert!(has_field(&output, 1));
@@ -255,7 +255,7 @@ fn project_identity() {
         proto_len(2, b"data"),
         proto_varint(3, 30),
     ]);
-    let output = run_project("{ ... }", &input);
+    let output = run_project("{ .. }", &input);
 
     // Identity projection: output == input
     assert_eq!(output, input);
@@ -294,7 +294,7 @@ fn project_nested_preserve_unknowns() {
         proto_varint(4, 1),
     ]);
 
-    let output = run_project("{ #1, #3 { #1, ... }, ... }", &input);
+    let output = run_project("{ #1, #3 { #1, .. }, .. }", &input);
 
     assert!(has_field(&output, 1));
     assert!(has_field(&output, 3));
@@ -305,80 +305,66 @@ fn project_nested_preserve_unknowns() {
 }
 
 #[test]
-fn project_deep_copy_one_level() {
-    // Deep copy recurses into LEN sub-messages. Recurse enters LEN fields
-    // as sub-messages, so leaf LEN fields (strings) must not be present
-    // at the default-action level — use varint leaves or explicit arms.
-    //
-    // Here: outer contains a LEN sub-message (field 5) which contains
-    // only varint fields. Recurse enters field 5 as sub-message, finds
-    // varints (non-LEN), skips them. So output has field 5 (empty sub-msg).
+fn project_copy_all() {
+    // Copy mode copies all fields verbatim at current level.
     let inner = build_message(&[proto_varint(1, 10), proto_varint(2, 20)]);
-    let input = build_message(&[proto_len(5, &inner)]);
+    let input = build_message(&[proto_varint(1, 42), proto_len(5, &inner)]);
 
     let output = run_project("{ .. }", &input);
-    // Field 5 is entered (LEN), inner varints are skipped (Recurse default
-    // skips non-LEN). The sub-message is re-emitted with its (empty) output.
+    // All fields copied verbatim (including sub-message as opaque bytes)
+    assert_eq!(output, input);
+}
+
+#[test]
+fn project_copy_with_exclusion() {
+    // Exclusions with copy mode: field 3 is excluded at top level.
+    let input = build_message(&[
+        proto_varint(1, 10),
+        proto_varint(3, 30),
+        proto_varint(5, 50),
+    ]);
+
+    let output = run_project("{ -#3, .. }", &input);
+    assert!(has_field(&output, 1));
+    assert!(!has_field(&output, 3));
     assert!(has_field(&output, 5));
 }
 
 #[test]
-fn project_deep_copy_with_exclusion() {
-    // Exclusions with deep copy: field 3 is excluded via Skip arm.
-    // Recurse only enters LEN fields as sub-messages, so inner fields
-    // must be LEN sub-messages (with valid proto content) to be preserved.
-    let leaf1 = build_message(&[proto_varint(1, 10)]);
-    let leaf3 = build_message(&[proto_varint(1, 30)]);
-    let inner = build_message(&[
-        proto_len(1, &leaf1), // sub-message: kept
-        proto_len(3, &leaf3), // sub-message: excluded
+fn project_copy_exclusion_preserves_nested() {
+    // { -#2, .. } strips field 2 at top level, but preserves everything else.
+    let inner = build_message(&[proto_varint(1, 10), proto_varint(2, 20)]);
+    let input = build_message(&[
+        proto_varint(2, 99),  // excluded at top level
+        proto_len(3, &inner), // kept (opaque)
     ]);
-    let input = build_message(&[proto_len(2, &inner)]);
 
-    let output = run_project("{ .. -#3 }", &input);
-    assert!(has_field(&output, 2));
-    let nested = extract_bytes(&output, 2).unwrap();
-    assert!(has_field(&nested, 1));
-    assert!(!has_field(&nested, 3));
-}
-
-#[test]
-fn project_deep_copy_excludes_at_depth() {
-    // { .. -#2 } strips field 2 inside a nested LEN sub-message via RECURSE.
-    let leaf1 = build_message(&[proto_varint(1, 10)]);
-    let leaf2 = build_message(&[proto_varint(1, 20)]);
-    let inner = build_message(&[
-        proto_len(1, &leaf1), // kept
-        proto_len(2, &leaf2), // excluded
-    ]);
-    let input = build_message(&[proto_len(3, &inner)]);
-
-    let output = run_project("{ .. -#2 }", &input);
+    let output = run_project("{ -#2, .. }", &input);
+    assert!(!has_field(&output, 2));
     assert!(has_field(&output, 3));
+    // The nested message is preserved as-is (opaque copy)
     let nested = extract_bytes(&output, 3).unwrap();
     assert!(has_field(&nested, 1));
-    assert!(!has_field(&nested, 2));
+    assert!(has_field(&nested, 2)); // inner field 2 is NOT excluded (copy is shallow)
 }
 
 #[test]
 fn project_multiple_exclusions() {
-    // Multiple exclusions in deep copy. Inner fields are LEN sub-messages.
-    let leaf = |v: u64| build_message(&[proto_varint(1, v)]);
-    let inner = build_message(&[
-        proto_len(1, &leaf(10)),
-        proto_len(2, &leaf(20)), // exclude
-        proto_len(3, &leaf(30)),
-        proto_len(4, &leaf(40)), // exclude
+    // Multiple exclusions at top level.
+    let input = build_message(&[
+        proto_varint(1, 10),
+        proto_varint(2, 20), // exclude
+        proto_varint(3, 30),
+        proto_varint(4, 40), // exclude
+        proto_varint(5, 50),
     ]);
-    let input = build_message(&[proto_len(5, &inner)]);
 
-    let output = run_project("{ .. -#2 -#4 }", &input);
+    let output = run_project("{ -#2, -#4, .. }", &input);
+    assert!(has_field(&output, 1));
+    assert!(!has_field(&output, 2));
+    assert!(has_field(&output, 3));
+    assert!(!has_field(&output, 4));
     assert!(has_field(&output, 5));
-    let nested = extract_bytes(&output, 5).unwrap();
-    assert!(has_field(&nested, 1));
-    assert!(!has_field(&nested, 2));
-    assert!(has_field(&nested, 3));
-    assert!(!has_field(&nested, 4));
 }
 
 #[test]
@@ -652,7 +638,7 @@ fn combined_preserve_unknowns() {
         proto_varint(3, 77),
     ]);
 
-    let result = run_project_and_filter("WHERE #1 > 10 SELECT { #1, ... }", &input);
+    let result = run_project_and_filter("WHERE #1 > 10 SELECT { #1, .. }", &input);
     assert!(result.is_some());
     let output = result.unwrap();
     assert!(has_field(&output, 1));
@@ -674,21 +660,20 @@ fn combined_nested_shared_parent() {
 }
 
 #[test]
-fn combined_deep_copy_with_predicate() {
-    // Combined: predicate on varint field, deep copy projection with exclusion.
-    // Inner fields are LEN sub-messages for Recurse compatibility.
-    let leaf1 = build_message(&[proto_varint(1, 10)]);
-    let leaf3 = build_message(&[proto_varint(1, 30)]);
-    let inner = build_message(&[proto_len(1, &leaf1), proto_len(3, &leaf3)]);
-    let input = build_message(&[proto_varint(2, 20), proto_len(5, &inner)]);
+fn combined_copy_with_predicate_and_exclusion() {
+    // Combined: predicate on varint field, copy projection with exclusion at top level.
+    let input = build_message(&[
+        proto_varint(2, 20),
+        proto_varint(3, 30),
+        proto_varint(5, 50),
+    ]);
 
-    let result = run_project_and_filter("WHERE #2 > 15 SELECT { .. -#3 }", &input);
+    let result = run_project_and_filter("WHERE #2 > 15 SELECT { -#3, .. }", &input);
     assert!(result.is_some());
     let output = result.unwrap();
+    assert!(has_field(&output, 2));
+    assert!(!has_field(&output, 3));
     assert!(has_field(&output, 5));
-    let nested = extract_bytes(&output, 5).unwrap();
-    assert!(has_field(&nested, 1));
-    assert!(!has_field(&nested, 3));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -731,7 +716,7 @@ fn project_preserves_all_wire_types_with_copy() {
         proto_fixed64(3, 0x5678),
         proto_len(4, b"data"),
     ]);
-    let output = run_project("{ ... }", &input);
+    let output = run_project("{ .. }", &input);
     assert_eq!(output, input);
 }
 

@@ -68,7 +68,6 @@ pub enum TokenKind {
     Hash,
     Minus,
     DotDot,
-    Ellipsis,
 
     // ── Operators ──
     EqEq,
@@ -118,7 +117,6 @@ impl TokenKind {
             TokenKind::Hash => "'#'".into(),
             TokenKind::Minus => "'-'".into(),
             TokenKind::DotDot => "'..'".into(),
-            TokenKind::Ellipsis => "'...'".into(),
             TokenKind::EqEq => "'=='".into(),
             TokenKind::BangEq => "'!='".into(),
             TokenKind::Lt => "'<'".into(),
@@ -278,13 +276,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_dots(&mut self, start: usize) -> Token {
-        if self.peek_byte_at(1) == Some(b'.') && self.peek_byte_at(2) == Some(b'.') {
-            self.pos += 3;
-            Token {
-                kind: TokenKind::Ellipsis,
-                span: Span::new(start, self.pos),
-            }
-        } else if self.peek_byte_at(1) == Some(b'.') {
+        if self.peek_byte_at(1) == Some(b'.') {
             self.pos += 2;
             Token {
                 kind: TokenKind::DotDot,
@@ -644,13 +636,21 @@ mod tests {
         let kinds = lex_kinds(". .. ...").unwrap();
         assert_eq!(
             kinds,
-            vec![TokenKind::Dot, TokenKind::DotDot, TokenKind::Ellipsis]
+            vec![
+                TokenKind::Dot,
+                TokenKind::DotDot,
+                TokenKind::DotDot,
+                TokenKind::Dot
+            ]
         );
     }
 
     #[test]
     fn lex_dots_adjacent() {
-        assert_eq!(lex_kinds("...").unwrap(), vec![TokenKind::Ellipsis]);
+        assert_eq!(
+            lex_kinds("...").unwrap(),
+            vec![TokenKind::DotDot, TokenKind::Dot]
+        );
         assert_eq!(lex_kinds("..").unwrap(), vec![TokenKind::DotDot]);
         assert_eq!(
             lex_kinds("..name").unwrap(),

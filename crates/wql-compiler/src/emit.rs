@@ -88,19 +88,12 @@ struct DeferredNested<'a> {
 
 fn emit_projection(emitter: &mut Emitter, proj: &BoundProjection) -> Result<(), CompileError> {
     match &proj.kind {
-        BoundProjectionKind::Inclusion {
-            items,
-            preserve_unknowns,
-        } => emit_inclusion(emitter, items, *preserve_unknowns),
-        BoundProjectionKind::DeepCopy { exclusions } => emit_deep_copy(emitter, exclusions),
+        BoundProjectionKind::Strict { items } => emit_strict(emitter, items),
+        BoundProjectionKind::Copy { items, exclusions } => emit_copy(emitter, items, exclusions),
     }
 }
 
-fn emit_inclusion(
-    emitter: &mut Emitter,
-    items: &[BoundProjectionItem],
-    preserve_unknowns: bool,
-) -> Result<(), CompileError> {
+fn emit_strict(emitter: &mut Emitter, items: &[BoundProjectionItem]) -> Result<(), CompileError> {
     let mut arms = Vec::new();
     let mut deferred: Vec<DeferredNested<'_>> = Vec::new();
     let mut has_deep_search = false;
@@ -141,8 +134,6 @@ fn emit_inclusion(
 
     let default = if has_deep_search {
         DefaultAction::Recurse(self_label.expect("self_label set when has_deep_search"))
-    } else if preserve_unknowns {
-        DefaultAction::Copy
     } else {
         DefaultAction::Skip
     };
@@ -158,24 +149,48 @@ fn emit_inclusion(
     Ok(())
 }
 
-#[allow(clippy::unnecessary_wraps)]
-fn emit_deep_copy(emitter: &mut Emitter, exclusions: &[u32]) -> Result<(), CompileError> {
-    let self_label = emitter.alloc_label();
-    emitter.push(Instruction::Label);
+fn emit_copy(
+    emitter: &mut Emitter,
+    items: &[BoundProjectionItem],
+    exclusions: &[u32],
+) -> Result<(), CompileError> {
+    let mut arms = Vec::new();
+    let mut deferred: Vec<DeferredNested<'_>> = Vec::new();
 
-    let arms = exclusions
-        .iter()
-        .map(|&field_num| DispatchArm {
+    // Copy mode always uses DefaultAction::Copy (shallow copy) to preserve
+    // all unmatched fields verbatim. Exclusions apply at the current level only.
+
+    // Only Nested items need explicit Frame arms. Field/DeepSearch items
+    // are handled by the DefaultAction::Copy — no explicit arm needed.
+    for item in items {
+        if let BoundProjectionItem::Nested { field, projection } = item {
+            let label = emitter.alloc_label();
+            arms.push(DispatchArm {
+                match_: ArmMatch::Field(field.field_num),
+                actions: vec![ArmAction::Frame(label)],
+            });
+            deferred.push(DeferredNested { projection });
+        }
+    }
+
+    // Exclusions get Skip arms
+    for &field_num in exclusions {
+        arms.push(DispatchArm {
             match_: ArmMatch::Field(field_num),
             actions: vec![ArmAction::Skip],
-        })
-        .collect();
+        });
+    }
 
     emitter.push(Instruction::Dispatch {
-        default: DefaultAction::Recurse(self_label),
+        default: DefaultAction::Copy,
         arms,
     });
     emitter.push(Instruction::Return);
+
+    for nested in deferred {
+        emitter.push(Instruction::Label);
+        emit_projection(emitter, nested.projection)?;
+    }
 
     Ok(())
 }
@@ -543,48 +558,15 @@ fn emit_combined(
     let mut field_map = HashMap::new();
     collect_predicate_fields(pred, emitter, &mut field_map)?;
 
-    // For DeepCopy, allocate the self-label BEFORE build_combined_dispatch
-    // so that label indices are assigned in emission order.
-    let deep_copy_label = match &proj.kind {
-        BoundProjectionKind::DeepCopy { .. } => {
-            let label = emitter.alloc_label();
-            emitter.push(Instruction::Label);
-            Some(label)
-        }
-        BoundProjectionKind::Inclusion { .. } => None,
-    };
-
-    let preserve_unknowns = matches!(
-        &proj.kind,
-        BoundProjectionKind::Inclusion {
-            preserve_unknowns: true,
-            ..
-        }
-    );
+    let is_copy = matches!(&proj.kind, BoundProjectionKind::Copy { .. });
 
     // Build the merged DISPATCH: combine projection arms with predicate decode arms
     let (merged_arms, proj_deferred, pred_deferred, merged_pred_fields) =
-        build_combined_dispatch(proj, &field_map, emitter, preserve_unknowns);
+        build_combined_dispatch(proj, &field_map, emitter, is_copy);
 
     let default = match &proj.kind {
-        BoundProjectionKind::Inclusion {
-            items,
-            preserve_unknowns,
-        } => {
-            let has_deep_search = items
-                .iter()
-                .any(|i| matches!(i, BoundProjectionItem::DeepSearch(_)));
-            if has_deep_search {
-                DefaultAction::Skip
-            } else if *preserve_unknowns {
-                DefaultAction::Copy
-            } else {
-                DefaultAction::Skip
-            }
-        }
-        BoundProjectionKind::DeepCopy { .. } => {
-            DefaultAction::Recurse(deep_copy_label.expect("allocated above"))
-        }
+        BoundProjectionKind::Strict { .. } => DefaultAction::Skip,
+        BoundProjectionKind::Copy { .. } => DefaultAction::Copy,
     };
 
     emitter.push(Instruction::Dispatch {
@@ -626,7 +608,7 @@ fn build_combined_dispatch<'a>(
     proj: &'a BoundProjection,
     field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
     emitter: &mut Emitter,
-    preserve_unknowns: bool,
+    is_copy: bool,
 ) -> CombinedDispatchResult<'a> {
     let mut arms_map: HashMap<u32, Vec<ArmAction>> = HashMap::new();
     let mut proj_deferred: Vec<DeferredCombinedNested<'a>> = Vec::new();
@@ -634,32 +616,33 @@ fn build_combined_dispatch<'a>(
     // Predicate fields to inject into existing projection Frames (keyed by label).
     let mut merged_pred_fields: HashMap<u32, Vec<NestedFieldInfo>> = HashMap::new();
 
-    // Add projection arms
-    match &proj.kind {
-        BoundProjectionKind::Inclusion { items, .. } => {
-            for item in items {
-                match item {
-                    BoundProjectionItem::Field(f) | BoundProjectionItem::DeepSearch(f) => {
-                        arms_map
-                            .entry(f.field_num)
-                            .or_default()
-                            .push(ArmAction::Copy);
-                    }
-                    BoundProjectionItem::Nested { field, projection } => {
-                        let label = emitter.alloc_label();
-                        arms_map
-                            .entry(field.field_num)
-                            .or_default()
-                            .push(ArmAction::Frame(label));
-                        proj_deferred.push(DeferredCombinedNested { label, projection });
-                    }
-                }
+    // Add projection arms from items
+    let items = match &proj.kind {
+        BoundProjectionKind::Strict { items } | BoundProjectionKind::Copy { items, .. } => items,
+    };
+    for item in items {
+        match item {
+            BoundProjectionItem::Field(f) | BoundProjectionItem::DeepSearch(f) => {
+                arms_map
+                    .entry(f.field_num)
+                    .or_default()
+                    .push(ArmAction::Copy);
+            }
+            BoundProjectionItem::Nested { field, projection } => {
+                let label = emitter.alloc_label();
+                arms_map
+                    .entry(field.field_num)
+                    .or_default()
+                    .push(ArmAction::Frame(label));
+                proj_deferred.push(DeferredCombinedNested { label, projection });
             }
         }
-        BoundProjectionKind::DeepCopy { exclusions } => {
-            for &field_num in exclusions {
-                arms_map.entry(field_num).or_default().push(ArmAction::Skip);
-            }
+    }
+
+    // Add exclusion arms (Copy mode only)
+    if let BoundProjectionKind::Copy { exclusions, .. } = &proj.kind {
+        for &field_num in exclusions {
+            arms_map.entry(field_num).or_default().push(ArmAction::Skip);
         }
     }
 
@@ -677,10 +660,10 @@ fn build_combined_dispatch<'a>(
                     encoding: info.encoding,
                 },
             );
-            // If this field is predicate-only and preserve_unknowns is set,
+            // If this field is predicate-only and in copy mode,
             // the default Copy action no longer applies (explicit arm overrides),
             // so we must add Copy to preserve the field in the output.
-            if is_new && preserve_unknowns {
+            if is_new && is_copy {
                 actions.push(ArmAction::Copy);
             }
         } else {
@@ -709,9 +692,9 @@ fn build_combined_dispatch<'a>(
                     .push(nested_field);
             } else {
                 let label = emitter.alloc_label();
-                // If predicate-only and preserve_unknowns, add Copy before Frame
+                // If predicate-only and in copy mode, add Copy before Frame
                 // so the nested message is preserved in the output.
-                if is_new && preserve_unknowns {
+                if is_new && is_copy {
                     actions.push(ArmAction::Copy);
                 }
                 actions.push(ArmAction::Frame(label));
@@ -752,89 +735,93 @@ fn emit_combined_nested_projection(
 
     // Build the projection's DISPATCH arms, then inject Decode arms for
     // predicate fields before emitting.
-    match &proj.kind {
-        BoundProjectionKind::Inclusion {
-            items,
-            preserve_unknowns,
-        } => {
-            let mut arms = Vec::new();
-            let mut deferred: Vec<DeferredNested<'_>> = Vec::new();
+    let (items, is_copy) = match &proj.kind {
+        BoundProjectionKind::Strict { items } => (items.as_slice(), false),
+        BoundProjectionKind::Copy { items, .. } => (items.as_slice(), true),
+    };
 
-            for item in items {
-                match item {
-                    BoundProjectionItem::Field(f) | BoundProjectionItem::DeepSearch(f) => {
-                        arms.push(DispatchArm {
-                            match_: ArmMatch::Field(f.field_num),
-                            actions: vec![ArmAction::Copy],
-                        });
-                    }
-                    BoundProjectionItem::Nested { field, projection } => {
-                        let label = emitter.alloc_label();
-                        arms.push(DispatchArm {
-                            match_: ArmMatch::Field(field.field_num),
-                            actions: vec![ArmAction::Frame(label)],
-                        });
-                        deferred.push(DeferredNested { projection });
-                    }
-                }
+    let mut arms = Vec::new();
+    let mut deferred: Vec<DeferredNested<'_>> = Vec::new();
+
+    for item in items {
+        match item {
+            BoundProjectionItem::Field(f) | BoundProjectionItem::DeepSearch(f) => {
+                arms.push(DispatchArm {
+                    match_: ArmMatch::Field(f.field_num),
+                    actions: vec![ArmAction::Copy],
+                });
             }
-
-            // Inject predicate decode arms (single-segment remaining paths only for now)
-            for pf in pred_fields {
-                if pf.remaining_path.len() == 1 {
-                    let field_num = pf.remaining_path[0];
-                    // Check if this field already has an arm
-                    if let Some(arm) = arms
-                        .iter_mut()
-                        .find(|a| a.match_ == ArmMatch::Field(field_num))
-                    {
-                        // Insert Decode before existing actions
-                        arm.actions.insert(
-                            0,
-                            ArmAction::Decode {
-                                reg: pf.reg,
-                                encoding: pf.encoding,
-                            },
-                        );
-                    } else {
-                        arms.push(DispatchArm {
-                            match_: ArmMatch::Field(field_num),
-                            actions: vec![ArmAction::Decode {
-                                reg: pf.reg,
-                                encoding: pf.encoding,
-                            }],
-                        });
-                    }
-                }
-                // Multi-segment remaining paths within nested projections are
-                // not supported in v1 combined mode.
+            BoundProjectionItem::Nested { field, projection } => {
+                let label = emitter.alloc_label();
+                arms.push(DispatchArm {
+                    match_: ArmMatch::Field(field.field_num),
+                    actions: vec![ArmAction::Frame(label)],
+                });
+                deferred.push(DeferredNested { projection });
             }
-
-            let default = if *preserve_unknowns {
-                DefaultAction::Copy
-            } else {
-                DefaultAction::Skip
-            };
-
-            arms.sort_by_key(|arm| match arm.match_ {
-                ArmMatch::Field(n) | ArmMatch::FieldAndWireType(n, _) => n,
-            });
-
-            emitter.push(Instruction::Dispatch { default, arms });
-            emitter.push(Instruction::Return);
-
-            for nested in deferred {
-                emitter.push(Instruction::Label);
-                emit_projection(emitter, nested.projection)?;
-            }
-
-            Ok(())
-        }
-        BoundProjectionKind::DeepCopy { .. } => {
-            // DeepCopy nested inside a combined projection — just emit normally.
-            emit_projection(emitter, proj)
         }
     }
+
+    // Add exclusion arms (Copy mode only)
+    if let BoundProjectionKind::Copy { exclusions, .. } = &proj.kind {
+        for &field_num in exclusions {
+            arms.push(DispatchArm {
+                match_: ArmMatch::Field(field_num),
+                actions: vec![ArmAction::Skip],
+            });
+        }
+    }
+
+    // Inject predicate decode arms (single-segment remaining paths only for now)
+    for pf in pred_fields {
+        if pf.remaining_path.len() == 1 {
+            let field_num = pf.remaining_path[0];
+            // Check if this field already has an arm
+            if let Some(arm) = arms
+                .iter_mut()
+                .find(|a| a.match_ == ArmMatch::Field(field_num))
+            {
+                // Insert Decode before existing actions
+                arm.actions.insert(
+                    0,
+                    ArmAction::Decode {
+                        reg: pf.reg,
+                        encoding: pf.encoding,
+                    },
+                );
+            } else {
+                arms.push(DispatchArm {
+                    match_: ArmMatch::Field(field_num),
+                    actions: vec![ArmAction::Decode {
+                        reg: pf.reg,
+                        encoding: pf.encoding,
+                    }],
+                });
+            }
+        }
+        // Multi-segment remaining paths within nested projections are
+        // not supported in v1 combined mode.
+    }
+
+    let default = if is_copy {
+        DefaultAction::Copy
+    } else {
+        DefaultAction::Skip
+    };
+
+    arms.sort_by_key(|arm| match arm.match_ {
+        ArmMatch::Field(n) | ArmMatch::FieldAndWireType(n, _) => n,
+    });
+
+    emitter.push(Instruction::Dispatch { default, arms });
+    emitter.push(Instruction::Return);
+
+    for nested in deferred {
+        emitter.push(Instruction::Label);
+        emit_projection(emitter, nested.projection)?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -869,18 +856,18 @@ mod tests {
     }
 
     #[test]
-    fn emit_flat_preserve() {
-        let instrs = compile_and_decode("{ #1, ... }");
+    fn emit_flat_copy() {
+        let instrs = compile_and_decode("{ #1, .. }");
+        // Copy mode: Field items are redundant (default is Copy), no explicit arms
         assert_eq!(instrs.len(), 2);
         match &instrs[0] {
             Instruction::Dispatch { default, arms } => {
                 assert_eq!(*default, DefaultAction::Copy);
-                assert_eq!(arms.len(), 1);
-                assert_eq!(arms[0].match_, ArmMatch::Field(1));
-                assert_eq!(arms[0].actions, vec![ArmAction::Copy]);
+                assert!(arms.is_empty());
             }
             other => panic!("expected Dispatch, got {other:?}"),
         }
+        assert_eq!(instrs[1], Instruction::Return);
     }
 
     #[test]
@@ -899,7 +886,8 @@ mod tests {
 
     #[test]
     fn emit_identity() {
-        let instrs = compile_and_decode("{ ... }");
+        let instrs = compile_and_decode("{ .. }");
+        // Copy mode (no items): Dispatch(Copy), Return
         assert_eq!(instrs.len(), 2);
         match &instrs[0] {
             Instruction::Dispatch { default, arms } => {
@@ -908,6 +896,7 @@ mod tests {
             }
             other => panic!("expected Dispatch, got {other:?}"),
         }
+        assert_eq!(instrs[1], Instruction::Return);
     }
 
     #[test]
@@ -939,20 +928,25 @@ mod tests {
     }
 
     #[test]
-    fn emit_nested_preserve() {
-        let instrs = compile_and_decode("{ #1, #3 { #1, ... }, ... }");
+    fn emit_nested_copy() {
+        let instrs = compile_and_decode("{ #1, #3 { #1, .. }, .. }");
+        // Shallow copy mode (items present): Dispatch(Copy)
         match &instrs[0] {
             Instruction::Dispatch { default, .. } => {
                 assert_eq!(*default, DefaultAction::Copy);
             }
             other => panic!("expected Dispatch, got {other:?}"),
         }
-        let nested_dispatch = instrs
+        // Find the nested dispatch (after the outer Return)
+        let nested_dispatches: Vec<_> = instrs
             .iter()
             .skip(2)
-            .find(|i| matches!(i, Instruction::Dispatch { .. }));
-        match nested_dispatch {
-            Some(Instruction::Dispatch { default, .. }) => {
+            .filter(|i| matches!(i, Instruction::Dispatch { .. }))
+            .collect();
+        assert!(!nested_dispatches.is_empty(), "expected nested Dispatch");
+        match nested_dispatches[0] {
+            Instruction::Dispatch { default, .. } => {
+                // Inner projection also has items, so shallow Copy
                 assert_eq!(*default, DefaultAction::Copy);
             }
             other => panic!("expected nested Dispatch with Copy default, got {other:?}"),
@@ -962,26 +956,26 @@ mod tests {
     #[test]
     fn emit_deep_copy() {
         let instrs = compile_and_decode("{ .. }");
-        assert_eq!(instrs.len(), 3);
-        assert_eq!(instrs[0], Instruction::Label);
-        match &instrs[1] {
+        // Copy mode: Dispatch(Copy), Return
+        assert_eq!(instrs.len(), 2);
+        match &instrs[0] {
             Instruction::Dispatch { default, arms } => {
-                assert!(matches!(default, DefaultAction::Recurse(_)));
+                assert_eq!(*default, DefaultAction::Copy);
                 assert!(arms.is_empty());
             }
             other => panic!("expected Dispatch, got {other:?}"),
         }
-        assert_eq!(instrs[2], Instruction::Return);
+        assert_eq!(instrs[1], Instruction::Return);
     }
 
     #[test]
     fn emit_deep_exclusion() {
-        let instrs = compile_and_decode("{ .. -#7 }");
-        assert_eq!(instrs.len(), 3);
-        assert_eq!(instrs[0], Instruction::Label);
-        match &instrs[1] {
+        let instrs = compile_and_decode("{ -#7, .. }");
+        // Copy mode with exclusion: Dispatch(Copy), Return
+        assert_eq!(instrs.len(), 2);
+        match &instrs[0] {
             Instruction::Dispatch { default, arms } => {
-                assert!(matches!(default, DefaultAction::Recurse(_)));
+                assert_eq!(*default, DefaultAction::Copy);
                 assert_eq!(arms.len(), 1);
                 assert_eq!(arms[0].match_, ArmMatch::Field(7));
                 assert_eq!(arms[0].actions, vec![ArmAction::Skip]);
@@ -1247,8 +1241,9 @@ mod tests {
     }
 
     #[test]
-    fn emit_combined_preserve() {
-        let instrs = compile_and_decode("WHERE #1 > 0 SELECT { #1, ... }");
+    fn emit_combined_copy() {
+        let instrs = compile_and_decode("WHERE #1 > 0 SELECT { #1, .. }");
+        // Combined + shallow copy mode (items present): Dispatch(Copy)
         match &instrs[0] {
             Instruction::Dispatch { default, .. } => {
                 assert_eq!(*default, DefaultAction::Copy);
@@ -1380,7 +1375,7 @@ mod tests {
 
     #[test]
     fn e2e_deep_copy_exclusion() {
-        let bytecode = compile("{ .. -#3 }", &CompileOptions::default()).unwrap();
+        let bytecode = compile("{ -#3, .. }", &CompileOptions::default()).unwrap();
         let program = wql_runtime::LoadedProgram::from_bytes(&bytecode).unwrap();
 
         let mut input = Vec::new();
@@ -1499,21 +1494,14 @@ mod tests {
     }
 
     #[test]
-    fn emit_deep_copy_with_predicate_label_order() {
-        // DeepCopy + predicate: label for Recurse must point to self
-        let instrs = compile_and_decode("WHERE #2 > 0 SELECT { .. -#3 }");
-        // Structure: Label, Dispatch(Recurse(self), [2→Decode, 3→Skip]), CmpGt, Return
-        assert_eq!(instrs[0], Instruction::Label);
-        match &instrs[1] {
+    fn emit_copy_with_predicate_and_exclusion() {
+        // Copy + predicate + exclusion
+        let instrs = compile_and_decode("WHERE #2 > 0 SELECT { -#3, .. }");
+        // Structure: Dispatch(Copy, [2->Decode+Copy, 3->Skip]), CmpGt, Return
+        match &instrs[0] {
             Instruction::Dispatch { default, arms } => {
-                match default {
-                    DefaultAction::Recurse(label_offset) => {
-                        // The recurse target should point back to the Label at instrs[0]
-                        assert!(*label_offset > 0 || instrs[0] == Instruction::Label);
-                    }
-                    other => panic!("expected Recurse default, got {other:?}"),
-                }
-                // Should have arms for field 2 (Decode) and field 3 (Skip)
+                assert_eq!(*default, DefaultAction::Copy);
+                // Should have arms for field 2 (Decode+Copy) and field 3 (Skip)
                 assert!(arms.iter().any(|a| a.match_ == ArmMatch::Field(2)));
                 assert!(arms.iter().any(|a| a.match_ == ArmMatch::Field(3)));
             }

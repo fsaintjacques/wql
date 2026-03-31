@@ -45,11 +45,11 @@ pub struct BoundProjection {
 
 #[derive(Debug)]
 pub enum BoundProjectionKind {
-    Inclusion {
+    /// Strict inclusion: only listed fields are emitted.
+    Strict { items: Vec<BoundProjectionItem> },
+    /// Copy mode: listed fields + all unmatched fields. Exclusions skip specific fields.
+    Copy {
         items: Vec<BoundProjectionItem>,
-        preserve_unknowns: bool,
-    },
-    DeepCopy {
         exclusions: Vec<u32>,
     },
 }
@@ -134,41 +134,38 @@ fn require_number(field: &FieldRef) -> Result<BoundField, CompileError> {
     }
 }
 
+fn bind_items_sf(items: &[ProjectionItem]) -> Result<Vec<BoundProjectionItem>, CompileError> {
+    items
+        .iter()
+        .map(|item| match item {
+            ProjectionItem::Field(f) => Ok(BoundProjectionItem::Field(require_number(f)?)),
+            ProjectionItem::Nested { field, projection } => Ok(BoundProjectionItem::Nested {
+                field: require_number(field)?,
+                projection: Box::new(bind_projection_sf(projection)?),
+            }),
+            ProjectionItem::DeepSearch(f) => {
+                Ok(BoundProjectionItem::DeepSearch(require_number(f)?))
+            }
+        })
+        .collect()
+}
+
+fn bind_excl_sf(exclusions: &[FieldRef]) -> Result<Vec<u32>, CompileError> {
+    exclusions
+        .iter()
+        .map(|f| Ok(require_number(f)?.field_num))
+        .collect()
+}
+
 fn bind_projection_sf(proj: &Projection) -> Result<BoundProjection, CompileError> {
     let kind = match &proj.kind {
-        ProjectionKind::Inclusion {
-            items,
-            preserve_unknowns,
-        } => {
-            let bound_items = items
-                .iter()
-                .map(|item| match item {
-                    ProjectionItem::Field(f) => Ok(BoundProjectionItem::Field(require_number(f)?)),
-                    ProjectionItem::Nested { field, projection } => {
-                        Ok(BoundProjectionItem::Nested {
-                            field: require_number(field)?,
-                            projection: Box::new(bind_projection_sf(projection)?),
-                        })
-                    }
-                    ProjectionItem::DeepSearch(f) => {
-                        Ok(BoundProjectionItem::DeepSearch(require_number(f)?))
-                    }
-                })
-                .collect::<Result<Vec<_>, CompileError>>()?;
-            BoundProjectionKind::Inclusion {
-                items: bound_items,
-                preserve_unknowns: *preserve_unknowns,
-            }
-        }
-        ProjectionKind::DeepCopy { exclusions } => {
-            let bound_excl = exclusions
-                .iter()
-                .map(|f| Ok(require_number(f)?.field_num))
-                .collect::<Result<Vec<_>, CompileError>>()?;
-            BoundProjectionKind::DeepCopy {
-                exclusions: bound_excl,
-            }
-        }
+        ProjectionKind::Strict { items } => BoundProjectionKind::Strict {
+            items: bind_items_sf(items)?,
+        },
+        ProjectionKind::Copy { items, exclusions } => BoundProjectionKind::Copy {
+            items: bind_items_sf(items)?,
+            exclusions: bind_excl_sf(exclusions)?,
+        },
     };
     Ok(BoundProjection {
         kind,
@@ -508,20 +505,18 @@ fn bind_projection_schema(
     fds: &FileDescriptorSet,
 ) -> Result<BoundProjection, CompileError> {
     let kind = match &proj.kind {
-        ProjectionKind::Inclusion {
-            items,
-            preserve_unknowns,
-        } => {
+        ProjectionKind::Strict { items } => {
             let bound_items = items
                 .iter()
                 .map(|item| bind_projection_item_schema(item, msg, fds))
                 .collect::<Result<Vec<_>, CompileError>>()?;
-            BoundProjectionKind::Inclusion {
-                items: bound_items,
-                preserve_unknowns: *preserve_unknowns,
-            }
+            BoundProjectionKind::Strict { items: bound_items }
         }
-        ProjectionKind::DeepCopy { exclusions } => {
+        ProjectionKind::Copy { items, exclusions } => {
+            let bound_items = items
+                .iter()
+                .map(|item| bind_projection_item_schema(item, msg, fds))
+                .collect::<Result<Vec<_>, CompileError>>()?;
             let bound_excl = exclusions
                 .iter()
                 .map(|f| {
@@ -529,7 +524,8 @@ fn bind_projection_schema(
                     Ok(num)
                 })
                 .collect::<Result<Vec<_>, CompileError>>()?;
-            BoundProjectionKind::DeepCopy {
+            BoundProjectionKind::Copy {
+                items: bound_items,
                 exclusions: bound_excl,
             }
         }
@@ -813,11 +809,7 @@ mod tests {
         let bound = bind_schema_free(&q).unwrap();
         match &bound {
             BoundQuery::Projection(proj) => match &proj.kind {
-                BoundProjectionKind::Inclusion {
-                    items,
-                    preserve_unknowns,
-                } => {
-                    assert!(!preserve_unknowns);
+                BoundProjectionKind::Strict { items } => {
                     assert_eq!(items.len(), 2);
                     match &items[0] {
                         BoundProjectionItem::Field(f) => assert_eq!(f.field_num, 1),
@@ -828,7 +820,7 @@ mod tests {
                         other => panic!("expected Field, got {other:?}"),
                     }
                 }
-                other => panic!("expected Inclusion, got {other:?}"),
+                other => panic!("expected Strict, got {other:?}"),
             },
             other => panic!("expected Projection, got {other:?}"),
         }
@@ -847,47 +839,48 @@ mod tests {
     }
 
     #[test]
-    fn bind_sf_preserve_unknowns() {
-        let q = parse("{ #1, ... }").unwrap();
+    fn bind_sf_copy_mode() {
+        let q = parse("{ #1, .. }").unwrap();
         let bound = bind_schema_free(&q).unwrap();
         match &bound {
             BoundQuery::Projection(proj) => match &proj.kind {
-                BoundProjectionKind::Inclusion {
-                    preserve_unknowns, ..
-                } => {
-                    assert!(preserve_unknowns);
+                BoundProjectionKind::Copy { items, exclusions } => {
+                    assert_eq!(items.len(), 1);
+                    assert!(exclusions.is_empty());
                 }
-                other => panic!("expected Inclusion, got {other:?}"),
+                other => panic!("expected Copy, got {other:?}"),
             },
             other => panic!("expected Projection, got {other:?}"),
         }
     }
 
     #[test]
-    fn bind_sf_deep_copy() {
+    fn bind_sf_copy_no_items() {
         let q = parse("{ .. }").unwrap();
         let bound = bind_schema_free(&q).unwrap();
         match &bound {
             BoundQuery::Projection(proj) => match &proj.kind {
-                BoundProjectionKind::DeepCopy { exclusions } => {
+                BoundProjectionKind::Copy { items, exclusions } => {
+                    assert!(items.is_empty());
                     assert!(exclusions.is_empty());
                 }
-                other => panic!("expected DeepCopy, got {other:?}"),
+                other => panic!("expected Copy, got {other:?}"),
             },
             other => panic!("expected Projection, got {other:?}"),
         }
     }
 
     #[test]
-    fn bind_sf_deep_copy_exclusion() {
-        let q = parse("{ .. -#7 }").unwrap();
+    fn bind_sf_copy_exclusion() {
+        let q = parse("{ -#7, .. }").unwrap();
         let bound = bind_schema_free(&q).unwrap();
         match &bound {
             BoundQuery::Projection(proj) => match &proj.kind {
-                BoundProjectionKind::DeepCopy { exclusions } => {
+                BoundProjectionKind::Copy { items, exclusions } => {
+                    assert!(items.is_empty());
                     assert_eq!(exclusions, &[7]);
                 }
-                other => panic!("expected DeepCopy, got {other:?}"),
+                other => panic!("expected Copy, got {other:?}"),
             },
             other => panic!("expected Projection, got {other:?}"),
         }
@@ -946,22 +939,22 @@ mod tests {
         let bound = bind_schema_free(&q).unwrap();
         match &bound {
             BoundQuery::Projection(proj) => match &proj.kind {
-                BoundProjectionKind::Inclusion { items, .. } => {
+                BoundProjectionKind::Strict { items } => {
                     assert_eq!(items.len(), 2);
                     match &items[1] {
                         BoundProjectionItem::Nested { field, projection } => {
                             assert_eq!(field.field_num, 3);
                             match &projection.kind {
-                                BoundProjectionKind::Inclusion { items: inner, .. } => {
+                                BoundProjectionKind::Strict { items: inner } => {
                                     assert_eq!(inner.len(), 1);
                                 }
-                                other => panic!("expected inner Inclusion, got {other:?}"),
+                                other => panic!("expected inner Strict, got {other:?}"),
                             }
                         }
                         other => panic!("expected Nested, got {other:?}"),
                     }
                 }
-                other => panic!("expected Inclusion, got {other:?}"),
+                other => panic!("expected Strict, got {other:?}"),
             },
             other => panic!("expected Projection, got {other:?}"),
         }
@@ -983,7 +976,7 @@ mod tests {
         let bound = bind_with_schema(&q, &schema_opts(&schema)).unwrap();
         match &bound {
             BoundQuery::Projection(proj) => match &proj.kind {
-                BoundProjectionKind::Inclusion { items, .. } => {
+                BoundProjectionKind::Strict { items } => {
                     assert_eq!(items.len(), 2);
                     match &items[0] {
                         BoundProjectionItem::Field(f) => assert_eq!(f.field_num, 1),
@@ -994,7 +987,7 @@ mod tests {
                         other => panic!("expected Field, got {other:?}"),
                     }
                 }
-                other => panic!("expected Inclusion, got {other:?}"),
+                other => panic!("expected Strict, got {other:?}"),
             },
             other => panic!("expected Projection, got {other:?}"),
         }
@@ -1007,26 +1000,26 @@ mod tests {
         let bound = bind_with_schema(&q, &schema_opts(&schema)).unwrap();
         match &bound {
             BoundQuery::Projection(proj) => match &proj.kind {
-                BoundProjectionKind::Inclusion { items, .. } => {
+                BoundProjectionKind::Strict { items } => {
                     assert_eq!(items.len(), 1);
                     match &items[0] {
                         BoundProjectionItem::Nested { field, projection } => {
                             assert_eq!(field.field_num, 3);
                             match &projection.kind {
-                                BoundProjectionKind::Inclusion { items: inner, .. } => {
+                                BoundProjectionKind::Strict { items: inner } => {
                                     assert_eq!(inner.len(), 1);
                                     match &inner[0] {
                                         BoundProjectionItem::Field(f) => assert_eq!(f.field_num, 1),
                                         other => panic!("expected Field, got {other:?}"),
                                     }
                                 }
-                                other => panic!("expected Inclusion, got {other:?}"),
+                                other => panic!("expected Strict, got {other:?}"),
                             }
                         }
                         other => panic!("expected Nested, got {other:?}"),
                     }
                 }
-                other => panic!("expected Inclusion, got {other:?}"),
+                other => panic!("expected Strict, got {other:?}"),
             },
             other => panic!("expected Projection, got {other:?}"),
         }
@@ -1039,10 +1032,10 @@ mod tests {
         let bound = bind_with_schema(&q, &schema_opts(&schema)).unwrap();
         match &bound {
             BoundQuery::Projection(proj) => match &proj.kind {
-                BoundProjectionKind::Inclusion { items, .. } => {
+                BoundProjectionKind::Strict { items } => {
                     assert_eq!(items.len(), 2);
                 }
-                other => panic!("expected Inclusion, got {other:?}"),
+                other => panic!("expected Strict, got {other:?}"),
             },
             other => panic!("expected Projection, got {other:?}"),
         }
@@ -1055,7 +1048,7 @@ mod tests {
         let bound = bind_with_schema(&q, &schema_opts(&schema)).unwrap();
         match &bound {
             BoundQuery::Projection(proj) => match &proj.kind {
-                BoundProjectionKind::Inclusion { items, .. } => {
+                BoundProjectionKind::Strict { items } => {
                     assert_eq!(items.len(), 2);
                     match &items[0] {
                         BoundProjectionItem::Field(f) => assert_eq!(f.field_num, 1),
@@ -1066,7 +1059,7 @@ mod tests {
                         other => panic!("expected Field, got {other:?}"),
                     }
                 }
-                other => panic!("expected Inclusion, got {other:?}"),
+                other => panic!("expected Strict, got {other:?}"),
             },
             other => panic!("expected Projection, got {other:?}"),
         }

@@ -184,7 +184,7 @@ fn select_nested_deep_address() {
 
 #[test]
 fn select_with_preserve_unknowns() {
-    let out = project("{ name, ... }", &opts_person(), &alice());
+    let out = project("{ name, .. }", &opts_person(), &alice());
     let p = decode_person(&out);
 
     // All fields preserved, name explicitly included
@@ -204,7 +204,7 @@ fn select_empty_strips_everything() {
 fn identity_projection() {
     let input = alice();
     let input_bytes = input.encode_to_vec();
-    let out = project("{ ... }", &opts_person(), &input);
+    let out = project("{ .. }", &opts_person(), &input);
     assert_eq!(out, input_bytes);
 }
 
@@ -406,7 +406,7 @@ fn combined_expensive_orders() {
 #[test]
 fn combined_filter_preserves_unknowns() {
     let result = project_and_filter(
-        "WHERE age > 18 SELECT { name, ... }",
+        "WHERE age > 18 SELECT { name, .. }",
         &opts_person(),
         &alice(),
     );

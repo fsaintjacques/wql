@@ -60,81 +60,46 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_projection_body(&mut self) -> Result<ProjectionKind, ParseError> {
-        match self.peek_kind()? {
-            // Empty projection: `{ }`
-            TokenKind::RBrace => {
-                return Ok(ProjectionKind::Inclusion {
-                    items: vec![],
-                    preserve_unknowns: false,
-                });
-            }
-
-            // Deep copy: `{ .. }` or `{ .. -field ... }`
-            TokenKind::DotDot => {
-                self.lexer.next_token()?; // consume ..
-
-                // Check if followed by a field ref (would be deep search, not deep copy).
-                // Deep copy body only has exclusions (-field), not bare field refs.
-                match self.peek_kind()? {
-                    TokenKind::Minus => {
-                        let exclusions = self.parse_exclusions()?;
-                        return Ok(ProjectionKind::DeepCopy { exclusions });
-                    }
-                    TokenKind::RBrace => {
-                        return Ok(ProjectionKind::DeepCopy { exclusions: vec![] });
-                    }
-                    _ => {
-                        // `..name` — this is actually a deep search item in inclusion mode.
-                        // Put back by parsing as inclusion starting with a deep search.
-                        let field = self.parse_field_ref()?;
-                        let first_item = ProjectionItem::DeepSearch(field);
-                        return self.parse_inclusion_rest(vec![first_item]);
-                    }
-                }
-            }
-
-            // Preserve all: `{ ... }`
-            TokenKind::Ellipsis => {
-                self.lexer.next_token()?; // consume ...
-                return Ok(ProjectionKind::Inclusion {
-                    items: vec![],
-                    preserve_unknowns: true,
-                });
-            }
-
-            _ => {}
+        // Empty projection: `{ }`
+        if matches!(self.peek_kind()?, TokenKind::RBrace) {
+            return Ok(ProjectionKind::Strict { items: vec![] });
         }
 
-        // Inclusion mode: parse items
-        let first = self.parse_inclusion_item()?;
-        self.parse_inclusion_rest(vec![first])
-    }
-
-    /// Parse the rest of an inclusion body after the first item is already collected.
-    fn parse_inclusion_rest(
-        &mut self,
-        mut items: Vec<ProjectionItem>,
-    ) -> Result<ProjectionKind, ParseError> {
-        let mut preserve_unknowns = false;
+        // Parse comma-separated entries until `}`.
+        // Entries: field, field { }, ..field (deep search), -field (exclusion).
+        // A bare `..` (not followed by field) terminates as Copy mode.
+        let mut items = Vec::new();
+        let mut exclusions = Vec::new();
 
         loop {
             match self.peek_kind()? {
-                TokenKind::Comma => {
-                    self.lexer.next_token()?; // consume comma
+                TokenKind::DotDot => {
+                    self.lexer.next_token()?;
                     match self.peek_kind()? {
-                        TokenKind::Ellipsis => {
-                            self.lexer.next_token()?;
-                            preserve_unknowns = true;
-                            break;
+                        // `..field` — deep search item
+                        TokenKind::Ident(_) | TokenKind::Hash => {
+                            let field = self.parse_field_ref()?;
+                            items.push(ProjectionItem::DeepSearch(field));
                         }
-                        TokenKind::RBrace => break, // trailing comma
-                        _ => items.push(self.parse_inclusion_item()?),
+                        // bare `..` — copy terminator, must be last before `}`
+                        _ => return Ok(ProjectionKind::Copy { items, exclusions }),
                     }
                 }
-                TokenKind::Ellipsis => {
+                TokenKind::Minus => {
                     self.lexer.next_token()?;
-                    preserve_unknowns = true;
-                    break;
+                    exclusions.push(self.parse_field_ref()?);
+                }
+                _ => {
+                    items.push(self.parse_projection_item()?);
+                }
+            }
+
+            match self.peek_kind()? {
+                TokenKind::Comma => {
+                    self.lexer.next_token()?;
+                    if matches!(self.peek_kind()?, TokenKind::RBrace) {
+                        break; // trailing comma
+                    }
                 }
                 TokenKind::RBrace => break,
                 _ => {
@@ -150,13 +115,22 @@ impl<'a> Parser<'a> {
             }
         }
 
-        Ok(ProjectionKind::Inclusion {
-            items,
-            preserve_unknowns,
-        })
+        // Reached `}` without `..` — Strict mode.
+        if !exclusions.is_empty() {
+            let tok = self.lexer.peek()?;
+            return Err(ParseError {
+                kind: ParseErrorKind::Expected {
+                    expected: "'..' after exclusions",
+                    found: "'}'".into(),
+                },
+                span: tok.span,
+            });
+        }
+
+        Ok(ProjectionKind::Strict { items })
     }
 
-    fn parse_inclusion_item(&mut self) -> Result<ProjectionItem, ParseError> {
+    fn parse_projection_item(&mut self) -> Result<ProjectionItem, ParseError> {
         // Deep search: `..field`
         if matches!(self.peek_kind()?, TokenKind::DotDot) {
             self.lexer.next_token()?;
@@ -226,15 +200,6 @@ impl<'a> Parser<'a> {
                 span: tok.span,
             }),
         }
-    }
-
-    fn parse_exclusions(&mut self) -> Result<Vec<FieldRef>, ParseError> {
-        let mut exclusions = Vec::new();
-        while matches!(self.peek_kind()?, TokenKind::Minus) {
-            self.lexer.next_token()?; // consume -
-            exclusions.push(self.parse_field_ref()?);
-        }
-        Ok(exclusions)
     }
 
     // ── Predicate parsing ──
@@ -635,6 +600,7 @@ fn keyword_to_str(kind: &TokenKind) -> &'static str {
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,19 +621,28 @@ mod tests {
     }
 
     /// Compare projection kind ignoring spans.
-    fn assert_inclusion(proj: &Projection, expected_items: &[&str], preserve: bool) {
+    fn assert_strict(proj: &Projection, expected_items: &[&str]) {
         match &proj.kind {
-            ProjectionKind::Inclusion {
-                items,
-                preserve_unknowns,
-            } => {
-                assert_eq!(*preserve_unknowns, preserve, "preserve_unknowns mismatch");
+            ProjectionKind::Strict { items } => {
                 let names: Vec<String> = items.iter().map(item_debug).collect();
                 let expected: Vec<String> =
                     expected_items.iter().map(|s| (*s).to_string()).collect();
                 assert_eq!(names, expected);
             }
-            ProjectionKind::DeepCopy { .. } => panic!("expected Inclusion, got DeepCopy"),
+            other => panic!("expected Strict, got {other:?}"),
+        }
+    }
+
+    fn assert_copy(proj: &Projection, expected_items: &[&str], expected_exclusions: usize) {
+        match &proj.kind {
+            ProjectionKind::Copy { items, exclusions } => {
+                let names: Vec<String> = items.iter().map(item_debug).collect();
+                let expected: Vec<String> =
+                    expected_items.iter().map(|s| (*s).to_string()).collect();
+                assert_eq!(names, expected);
+                assert_eq!(exclusions.len(), expected_exclusions);
+            }
+            other => panic!("expected Copy, got {other:?}"),
         }
     }
 
@@ -691,30 +666,30 @@ mod tests {
     #[test]
     fn proj_flat_strict() {
         let proj = parse_proj("{ name, age }").unwrap();
-        assert_inclusion(&proj, &["name", "age"], false);
+        assert_strict(&proj, &["name", "age"]);
     }
 
     #[test]
-    fn proj_flat_preserve() {
-        let proj = parse_proj("{ name, age, ... }").unwrap();
-        assert_inclusion(&proj, &["name", "age"], true);
+    fn proj_flat_copy() {
+        let proj = parse_proj("{ name, age, .. }").unwrap();
+        assert_copy(&proj, &["name", "age"], 0);
     }
 
     #[test]
     fn proj_trailing_comma() {
         let proj = parse_proj("{ name, age, }").unwrap();
-        assert_inclusion(&proj, &["name", "age"], false);
+        assert_strict(&proj, &["name", "age"]);
     }
 
     #[test]
     fn proj_nested() {
         let proj = parse_proj("{ address { city } }").unwrap();
-        assert_inclusion(&proj, &["address{...}"], false);
+        assert_strict(&proj, &["address{...}"]);
 
         // Verify the nested projection
-        if let ProjectionKind::Inclusion { items, .. } = &proj.kind {
+        if let ProjectionKind::Strict { items } = &proj.kind {
             if let ProjectionItem::Nested { projection, .. } = &items[0] {
-                assert_inclusion(projection, &["city"], false);
+                assert_strict(projection, &["city"]);
             } else {
                 panic!("expected Nested");
             }
@@ -722,55 +697,51 @@ mod tests {
     }
 
     #[test]
-    fn proj_nested_preserve() {
-        let proj = parse_proj("{ address { city, ... }, ... }").unwrap();
-        assert_inclusion(&proj, &["address{...}"], true);
+    fn proj_nested_copy() {
+        let proj = parse_proj("{ address { city, .. }, .. }").unwrap();
+        assert_copy(&proj, &["address{...}"], 0);
 
-        if let ProjectionKind::Inclusion { items, .. } = &proj.kind {
+        if let ProjectionKind::Copy { items, .. } = &proj.kind {
             if let ProjectionItem::Nested { projection, .. } = &items[0] {
-                assert_inclusion(projection, &["city"], true);
+                assert_copy(projection, &["city"], 0);
             }
         }
     }
 
     #[test]
-    fn proj_deep_copy() {
+    fn proj_copy_no_items() {
         let proj = parse_proj("{ .. }").unwrap();
-        match &proj.kind {
-            ProjectionKind::DeepCopy { exclusions } => {
-                assert!(exclusions.is_empty());
-            }
-            _ => panic!("expected DeepCopy"),
-        }
+        assert_copy(&proj, &[], 0);
     }
 
     #[test]
-    fn proj_deep_exclusion() {
-        let proj = parse_proj("{ .. -payload -thumbnail }").unwrap();
+    fn proj_copy_exclusion() {
+        let proj = parse_proj("{ -payload, -thumbnail, .. }").unwrap();
         match &proj.kind {
-            ProjectionKind::DeepCopy { exclusions } => {
+            ProjectionKind::Copy { items, exclusions } => {
+                assert!(items.is_empty());
                 assert_eq!(exclusions.len(), 2);
                 assert!(matches!(&exclusions[0], FieldRef::Name(n, _) if n == "payload"));
                 assert!(matches!(&exclusions[1], FieldRef::Name(n, _) if n == "thumbnail"));
             }
-            _ => panic!("expected DeepCopy"),
+            other => panic!("expected Copy, got {other:?}"),
         }
     }
 
     #[test]
     fn proj_deep_search() {
         let proj = parse_proj("{ ..name }").unwrap();
-        assert_inclusion(&proj, &["..name"], false);
+        assert_strict(&proj, &["..name"]);
     }
 
     #[test]
     fn proj_scoped_deep() {
         let proj = parse_proj("{ departments { ..name } }").unwrap();
-        assert_inclusion(&proj, &["departments{...}"], false);
+        assert_strict(&proj, &["departments{...}"]);
 
-        if let ProjectionKind::Inclusion { items, .. } = &proj.kind {
+        if let ProjectionKind::Strict { items } = &proj.kind {
             if let ProjectionItem::Nested { projection, .. } = &items[0] {
-                assert_inclusion(projection, &["..name"], false);
+                assert_strict(projection, &["..name"]);
             }
         }
     }
@@ -778,9 +749,9 @@ mod tests {
     #[test]
     fn proj_field_number() {
         let proj = parse_proj("{ #1, #3 { #1 } }").unwrap();
-        assert_inclusion(&proj, &["#1", "#3{...}"], false);
+        assert_strict(&proj, &["#1", "#3{...}"]);
 
-        if let ProjectionKind::Inclusion { items, .. } = &proj.kind {
+        if let ProjectionKind::Strict { items } = &proj.kind {
             assert!(matches!(
                 &items[0],
                 ProjectionItem::Field(FieldRef::Number(1, _))
@@ -790,7 +761,7 @@ mod tests {
                 projection,
             } = &items[1]
             {
-                assert_inclusion(projection, &["#1"], false);
+                assert_strict(projection, &["#1"]);
             } else {
                 panic!("expected Nested with #3");
             }
@@ -800,30 +771,38 @@ mod tests {
     #[test]
     fn proj_empty() {
         let proj = parse_proj("{ }").unwrap();
-        assert_inclusion(&proj, &[], false);
+        assert_strict(&proj, &[]);
     }
 
     #[test]
-    fn proj_preserve_all() {
-        let proj = parse_proj("{ ... }").unwrap();
-        assert_inclusion(&proj, &[], true);
+    fn proj_copy_only() {
+        let proj = parse_proj("{ .. }").unwrap();
+        assert_copy(&proj, &[], 0);
     }
 
     #[test]
-    fn proj_mixed_items() {
-        let proj = parse_proj("{ name, ..tags, address { city }, ... }").unwrap();
-        assert_inclusion(&proj, &["name", "..tags", "address{...}"], true);
+    fn proj_mixed_items_copy() {
+        let proj = parse_proj("{ name, address { city }, .. }").unwrap();
+        assert_copy(&proj, &["name", "address{...}"], 0);
     }
 
     #[test]
-    fn proj_deep_exclusion_by_number() {
-        let proj = parse_proj("{ .. -#7 }").unwrap();
+    fn proj_err_exclusion_without_copy() {
+        // Exclusions require `..` at the end
+        let err = parse_proj("{ -#3 }").unwrap_err();
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
+    }
+
+    #[test]
+    fn proj_copy_exclusion_by_number() {
+        let proj = parse_proj("{ -#7, .. }").unwrap();
         match &proj.kind {
-            ProjectionKind::DeepCopy { exclusions } => {
+            ProjectionKind::Copy { items, exclusions } => {
+                assert!(items.is_empty());
                 assert_eq!(exclusions.len(), 1);
                 assert!(matches!(&exclusions[0], FieldRef::Number(7, _)));
             }
-            _ => panic!("expected DeepCopy"),
+            other => panic!("expected Copy, got {other:?}"),
         }
     }
 
@@ -841,22 +820,20 @@ mod tests {
     }
 
     #[test]
-    fn proj_err_ellipsis_not_last() {
-        let err = parse_proj("{ ..., name }").unwrap_err();
-        // After `...`, we expect `}` but find `,`
-        assert!(matches!(
-            err.kind,
-            ParseErrorKind::Expected {
-                expected: "'}'",
-                ..
-            }
-        ));
+    fn proj_copy_items_before_dotdot() {
+        // Items come before `..`
+        let proj = parse_proj("{ name, .. }").unwrap();
+        assert!(matches!(proj.kind, ProjectionKind::Copy { .. }));
+        if let ProjectionKind::Copy { items, exclusions } = &proj.kind {
+            assert_eq!(items.len(), 1);
+            assert!(exclusions.is_empty());
+        }
     }
 
     #[test]
     fn proj_contextual_keyword_as_field() {
         let proj = parse_proj("{ exists, has, in }").unwrap();
-        assert_inclusion(&proj, &["exists", "has", "in"], false);
+        assert_strict(&proj, &["exists", "has", "in"]);
     }
 
     #[test]
@@ -1197,7 +1174,7 @@ mod tests {
                         ..
                     }
                 ));
-                assert_inclusion(&projection, &["name"], false);
+                assert_strict(&projection, &["name"]);
             }
             _ => panic!("expected Combined"),
         }
@@ -1206,7 +1183,7 @@ mod tests {
     #[test]
     fn combined_complex() {
         let q = parse_query(
-            r#"WHERE age > 18 AND address.city == "NYC" SELECT { name, address { city }, ... }"#,
+            r#"WHERE age > 18 AND address.city == "NYC" SELECT { name, address { city }, .. }"#,
         )
         .unwrap();
         match q {
@@ -1215,7 +1192,7 @@ mod tests {
                 projection,
             } => {
                 assert!(matches!(&predicate.kind, PredicateKind::And(_, _)));
-                assert_inclusion(&projection, &["name", "address{...}"], true);
+                assert_copy(&projection, &["name", "address{...}"], 0);
             }
             _ => panic!("expected Combined"),
         }
@@ -1341,7 +1318,7 @@ mod tests {
 
     #[test]
     fn public_parse_fn() {
-        let q = crate::parse(r#"WHERE age > 18 SELECT { name, ... }"#).unwrap();
+        let q = crate::parse(r#"WHERE age > 18 SELECT { name, .. }"#).unwrap();
         assert!(matches!(q, Query::Combined { .. }));
     }
 }

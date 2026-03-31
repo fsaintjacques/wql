@@ -7,43 +7,37 @@ fn flat_projection() {
     let Query::Projection(p) = q else {
         panic!("expected Projection");
     };
-    let ProjectionKind::Inclusion {
-        items,
-        preserve_unknowns,
-    } = &p.kind
-    else {
-        panic!("expected Inclusion");
+    let ProjectionKind::Strict { items } = &p.kind else {
+        panic!("expected Strict");
     };
     assert_eq!(items.len(), 2);
-    assert!(!preserve_unknowns);
 }
 
 #[test]
-fn nested_projection_with_unknowns() {
-    let q = parse("{ name, address { city, ... }, ... }").unwrap();
+fn nested_projection_with_copy() {
+    let q = parse("{ name, address { city, .. }, .. }").unwrap();
     let Query::Projection(p) = q else {
         panic!("expected Projection");
     };
-    let ProjectionKind::Inclusion {
-        items,
-        preserve_unknowns,
-    } = &p.kind
-    else {
-        panic!("expected Inclusion");
+    let ProjectionKind::Copy { items, .. } = &p.kind else {
+        panic!("expected Copy");
     };
-    assert!(preserve_unknowns);
     assert!(matches!(&items[1], ProjectionItem::Nested { .. }));
 }
 
 #[test]
-fn deep_copy_with_exclusion() {
-    let q = parse("{ .. -payload -thumbnail }").unwrap();
+fn copy_with_exclusion() {
+    let q = parse("{ -payload, -thumbnail, .. }").unwrap();
     let Query::Projection(p) = q else {
         panic!("expected Projection");
     };
-    let ProjectionKind::DeepCopy { exclusions } = &p.kind else {
-        panic!("expected DeepCopy");
+    let ProjectionKind::Copy {
+        items, exclusions, ..
+    } = &p.kind
+    else {
+        panic!("expected Copy");
     };
+    assert!(items.is_empty());
     assert_eq!(exclusions.len(), 2);
 }
 
@@ -53,20 +47,20 @@ fn deep_field_search() {
     let Query::Projection(p) = q else {
         panic!("expected Projection");
     };
-    let ProjectionKind::Inclusion { items, .. } = &p.kind else {
-        panic!("expected Inclusion");
+    let ProjectionKind::Strict { items } = &p.kind else {
+        panic!("expected Strict");
     };
     assert!(matches!(&items[0], ProjectionItem::Nested { .. }));
 }
 
 #[test]
 fn schema_free_projection() {
-    let q = parse("{ #1, #3 { #1, ... } }").unwrap();
+    let q = parse("{ #1, #3 { #1, .. } }").unwrap();
     let Query::Projection(p) = q else {
         panic!("expected Projection");
     };
-    let ProjectionKind::Inclusion { items, .. } = &p.kind else {
-        panic!("expected Inclusion");
+    let ProjectionKind::Strict { items } = &p.kind else {
+        panic!("expected Strict");
     };
     assert!(matches!(
         &items[0],
@@ -104,7 +98,7 @@ fn predicate_string_ops() {
 #[test]
 fn combined_filter_and_project() {
     let q =
-        parse(r#"WHERE age > 18 AND address.city == "NYC" SELECT { name, address { city }, ... }"#)
+        parse(r#"WHERE age > 18 AND address.city == "NYC" SELECT { name, address { city }, .. }"#)
             .unwrap();
     let Query::Combined {
         predicate,
@@ -114,27 +108,22 @@ fn combined_filter_and_project() {
         panic!("expected Combined");
     };
     assert!(matches!(&predicate.kind, PredicateKind::And(_, _)));
-    let ProjectionKind::Inclusion {
-        items,
-        preserve_unknowns,
-    } = &projection.kind
-    else {
-        panic!("expected Inclusion");
+    let ProjectionKind::Copy { items, .. } = &projection.kind else {
+        panic!("expected Copy");
     };
     assert_eq!(items.len(), 2);
-    assert!(preserve_unknowns);
 }
 
 #[test]
 fn predicate_parenthesized_precedence() {
-    // Without parens: a > 1 || b > 2 && c > 3 → Or(a, And(b, c))
+    // Without parens: a > 1 || b > 2 && c > 3 -> Or(a, And(b, c))
     let q1 = parse("a > 1 || b > 2 && c > 3").unwrap();
     let Query::Predicate(p1) = q1 else { panic!() };
     assert!(
         matches!(&p1.kind, PredicateKind::Or(_, rhs) if matches!(&rhs.kind, PredicateKind::And(_, _)))
     );
 
-    // With parens: (a > 1 || b > 2) && c > 3 → And(Or(a, b), c)
+    // With parens: (a > 1 || b > 2) && c > 3 -> And(Or(a, b), c)
     let q2 = parse("(a > 1 || b > 2) && c > 3").unwrap();
     let Query::Predicate(p2) = q2 else { panic!() };
     assert!(

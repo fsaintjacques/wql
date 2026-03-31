@@ -25,23 +25,21 @@ pub struct Projection {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectionKind {
-    /// `{ field1, field2 { … }, ..field3, ... }`
-    ///
-    /// Inclusion mode: an explicit list of fields to include.
-    /// If `preserve_unknowns` is true, unmatched fields are copied (the `...` trailer).
-    /// If false, unmatched fields are dropped.
-    Inclusion {
-        items: Vec<ProjectionItem>,
-        preserve_unknowns: bool,
-    },
+    /// `{ field1, field2 { … } }` — strict inclusion, drop unmatched fields.
+    Strict { items: Vec<ProjectionItem> },
 
-    /// `{ .. }` or `{ .. -field1 -field2 }`
+    /// `{ field1, .. }` or `{ .. }` or `{ .. -field1 }` — copy mode.
     ///
-    /// Deep copy mode: recursively copy all fields, optionally excluding some.
-    DeepCopy { exclusions: Vec<FieldRef> },
+    /// Copies all unmatched fields. Explicit items are included as usual.
+    /// Exclusions (via `-field`) strip specific fields at the current level.
+    /// `{ .. }` alone is identity copy. `{ .. -secret }` copies all except `secret`.
+    Copy {
+        items: Vec<ProjectionItem>,
+        exclusions: Vec<FieldRef>,
+    },
 }
 
-/// A single item in an inclusion-mode projection.
+/// A single item in a projection.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProjectionItem {
     /// `name` or `#1` — flat field inclusion.

@@ -23,12 +23,12 @@
 ----
 {}
 
-{ ... }
+{ .. }
 {"name": "Alice", "age": 30, "status": "ACTIVE"}
 ----
 {"name": "Alice", "age": 30, "status": "ACTIVE"}
 
-{ name, ... }
+{ name, .. }
 {"name": "Alice", "age": 30, "status": "ACTIVE"}
 ----
 {"name": "Alice", "age": 30, "status": "ACTIVE"}
@@ -62,7 +62,7 @@
 ----
 {"name": "Alice", "address": {"city": "NYC", "location": {"lat": 40712776}}}
 
-{ name, address { city, ... }, ... }
+{ name, address { city, .. }, .. }
 {"name": "Alice", "address": {"city": "NYC", "country": "US", "zip": 10001}}
 ----
 {"name": "Alice", "address": {"city": "NYC", "country": "US", "zip": 10001}}
@@ -292,14 +292,14 @@ WHERE status == 1 SELECT { name, address { city, country } }
 {"name": "Alice", "address": {"city": "NYC", "country": "US"}}
 <none>
 
-WHERE age > 18 SELECT { name, ... }
+WHERE age > 18 SELECT { name, .. }
 {"name": "Alice", "age": 30, "status": "ACTIVE"}
 {"name": "Bob", "age": 17}
 ----
 {"name": "Alice", "age": 30, "status": "ACTIVE"}
 <none>
 
-WHERE address.city == "NYC" SELECT { name, ... }
+WHERE address.city == "NYC" SELECT { name, .. }
 {"name": "Alice", "age": 30, "address": {"city": "NYC", "country": "US"}, "status": "ACTIVE"}
 {"name": "Bob", "age": 17, "address": {"city": "London"}}
 ----
