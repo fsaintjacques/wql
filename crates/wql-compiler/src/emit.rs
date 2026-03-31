@@ -330,7 +330,12 @@ struct DeferredPredicateNested {
     fields: Vec<NestedFieldInfo>,
 }
 
-fn emit_nested_predicate_dispatches(emitter: &mut Emitter, deferred: Vec<DeferredPredicateNested>) {
+fn emit_nested_predicate_dispatches(
+    emitter: &mut Emitter,
+    deferred: Vec<DeferredPredicateNested>,
+    pred: &BoundPredicate,
+    field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
+) -> Result<(), CompileError> {
     for nested in deferred {
         emitter.push(Instruction::Label);
         let mut arms = Vec::new();
@@ -348,15 +353,15 @@ fn emit_nested_predicate_dispatches(emitter: &mut Emitter, deferred: Vec<Deferre
         for (&seg, infos) in &by_first {
             let all_leaf = infos.iter().all(|info| info.remaining_path.len() == 1);
             if all_leaf {
-                assert_eq!(infos.len(), 1);
-                let info = infos[0];
-                arms.push(DispatchArm {
-                    match_: ArmMatch::Field(seg),
-                    actions: vec![ArmAction::Decode {
-                        reg: info.reg,
-                        encoding: info.encoding,
-                    }],
-                });
+                for info in infos {
+                    arms.push(DispatchArm {
+                        match_: ArmMatch::Field(seg),
+                        actions: vec![ArmAction::Decode {
+                            reg: info.reg,
+                            encoding: info.encoding,
+                        }],
+                    });
+                }
             } else {
                 let label = emitter.alloc_label();
                 arms.push(DispatchArm {
@@ -383,34 +388,58 @@ fn emit_nested_predicate_dispatches(emitter: &mut Emitter, deferred: Vec<Deferre
             default: DefaultAction::Skip,
             arms,
         });
+
+        // Emit predicate logic for fields decoded in this Frame, then Or
+        // to accumulate across repeated element invocations (ANY semantics).
+        emit_predicate_logic(emitter, pred, field_map, false)?;
+        emitter.push(Instruction::Or);
+
         emitter.push(Instruction::Return);
 
         if !sub_deferred.is_empty() {
-            emit_nested_predicate_dispatches(emitter, sub_deferred);
+            emit_nested_predicate_dispatches(emitter, sub_deferred, pred, field_map)?;
         }
+    }
+    Ok(())
+}
+
+/// Check if a predicate leaf references a multi-segment (nested) field.
+fn is_nested_predicate_leaf(pred: &BoundPredicate) -> bool {
+    match &pred.kind {
+        BoundPredicateKind::Comparison { field, .. }
+        | BoundPredicateKind::Presence(field)
+        | BoundPredicateKind::InSet { field, .. }
+        | BoundPredicateKind::StringPredicate { field, .. } => field.segments.len() > 1,
+        _ => false,
     }
 }
 
 /// Emit predicate comparison/logic instructions in post-order.
+/// When `skip_nested` is true, multi-segment leaf predicates are skipped
+/// (their results are already on the bool stack from Frame evaluation).
 fn emit_predicate_logic(
     emitter: &mut Emitter,
     pred: &BoundPredicate,
     field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
+    skip_nested: bool,
 ) -> Result<(), CompileError> {
     match &pred.kind {
         BoundPredicateKind::And(l, r) => {
-            emit_predicate_logic(emitter, l, field_map)?;
-            emit_predicate_logic(emitter, r, field_map)?;
+            emit_predicate_logic(emitter, l, field_map, skip_nested)?;
+            emit_predicate_logic(emitter, r, field_map, skip_nested)?;
             emitter.push(Instruction::And);
         }
         BoundPredicateKind::Or(l, r) => {
-            emit_predicate_logic(emitter, l, field_map)?;
-            emit_predicate_logic(emitter, r, field_map)?;
+            emit_predicate_logic(emitter, l, field_map, skip_nested)?;
+            emit_predicate_logic(emitter, r, field_map, skip_nested)?;
             emitter.push(Instruction::Or);
         }
         BoundPredicateKind::Not(inner) => {
-            emit_predicate_logic(emitter, inner, field_map)?;
+            emit_predicate_logic(emitter, inner, field_map, skip_nested)?;
             emitter.push(Instruction::Not);
+        }
+        _ if skip_nested && is_nested_predicate_leaf(pred) => {
+            // Result already on the bool stack from Frame Or-accumulation.
         }
         BoundPredicateKind::Comparison { field, op, value } => {
             let reg = field_map[&field.segments].reg;
@@ -530,6 +559,15 @@ fn emit_predicate_program(
     let mut field_map = HashMap::new();
     collect_predicate_fields(pred, emitter, &mut field_map)?;
 
+    let has_nested = field_map.values().any(|info| info.path.len() > 1);
+
+    // Seed false on the bool stack for each nested predicate group.
+    // IsSet on an unused register pushes false.
+    if has_nested {
+        let seed_reg = emitter.alloc_register()?;
+        emitter.push(Instruction::IsSet { reg: seed_reg });
+    }
+
     let (arms, deferred) = build_predicate_dispatch(&field_map, emitter);
 
     emitter.push(Instruction::Dispatch {
@@ -537,10 +575,12 @@ fn emit_predicate_program(
         arms,
     });
 
-    emit_predicate_logic(emitter, pred, &field_map)?;
+    // Emit only single-segment (non-nested) predicate logic after the DISPATCH.
+    // Multi-segment predicates are evaluated inside their Frame sub-programs.
+    emit_predicate_logic(emitter, pred, &field_map, has_nested)?;
     emitter.push(Instruction::Return);
 
-    emit_nested_predicate_dispatches(emitter, deferred);
+    emit_nested_predicate_dispatches(emitter, deferred, pred, &field_map)?;
 
     Ok(())
 }
@@ -564,17 +604,25 @@ fn emit_combined(
     let (merged_arms, proj_deferred, pred_deferred, merged_pred_fields) =
         build_combined_dispatch(proj, &field_map, emitter, is_copy);
 
+    let has_nested = field_map.values().any(|info| info.path.len() > 1);
+
     let default = match &proj.kind {
         BoundProjectionKind::Strict { .. } => DefaultAction::Skip,
         BoundProjectionKind::Copy { .. } => DefaultAction::Copy,
     };
+
+    // Seed false before DISPATCH for repeated field ANY accumulation.
+    if has_nested {
+        let seed_reg = emitter.alloc_register()?;
+        emitter.push(Instruction::IsSet { reg: seed_reg });
+    }
 
     emitter.push(Instruction::Dispatch {
         default,
         arms: merged_arms,
     });
 
-    emit_predicate_logic(emitter, pred, &field_map)?;
+    emit_predicate_logic(emitter, pred, &field_map, has_nested)?;
     emitter.push(Instruction::Return);
 
     // Emit deferred nested sub-programs for projection, injecting any
@@ -582,11 +630,11 @@ fn emit_combined(
     for nested in proj_deferred {
         emitter.push(Instruction::Label);
         let pred_fields = merged_pred_fields.get(&nested.label);
-        emit_combined_nested_projection(emitter, nested.projection, pred_fields)?;
+        emit_combined_nested_projection(emitter, nested.projection, pred_fields, pred, &field_map)?;
     }
 
     // Emit deferred nested dispatches for predicate
-    emit_nested_predicate_dispatches(emitter, pred_deferred);
+    emit_nested_predicate_dispatches(emitter, pred_deferred, pred, &field_map)?;
 
     Ok(())
 }
@@ -726,6 +774,8 @@ fn emit_combined_nested_projection(
     emitter: &mut Emitter,
     proj: &BoundProjection,
     pred_fields: Option<&Vec<NestedFieldInfo>>,
+    pred: &BoundPredicate,
+    field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
 ) -> Result<(), CompileError> {
     if pred_fields.is_none() || pred_fields.is_some_and(Vec::is_empty) {
         // No predicate fields to merge — use standard projection emission.
@@ -814,6 +864,11 @@ fn emit_combined_nested_projection(
     });
 
     emitter.push(Instruction::Dispatch { default, arms });
+
+    // Emit predicate logic inside the Frame for repeated field ANY semantics.
+    emit_predicate_logic(emitter, pred, field_map, false)?;
+    emitter.push(Instruction::Or);
+
     emitter.push(Instruction::Return);
 
     for nested in deferred {
@@ -1124,8 +1179,10 @@ mod tests {
     #[test]
     fn emit_pred_nested() {
         let instrs = compile_and_decode("#3.#1 > 0");
-        // Should have Frame for field 3, then nested Dispatch with Decode for field 1
-        match &instrs[0] {
+        // First instruction is IsSet seed for repeated field ANY semantics
+        assert!(matches!(instrs[0], Instruction::IsSet { .. }));
+        // Then DISPATCH with Frame for field 3
+        match &instrs[1] {
             Instruction::Dispatch { arms, .. } => {
                 assert_eq!(arms.len(), 1);
                 assert_eq!(arms[0].match_, ArmMatch::Field(3));
@@ -1136,7 +1193,7 @@ mod tests {
         // Find nested dispatch
         let nested = instrs
             .iter()
-            .skip(1)
+            .skip(2)
             .find(|i| matches!(i, Instruction::Dispatch { .. }));
         match nested {
             Some(Instruction::Dispatch { arms, .. }) => {
@@ -1151,7 +1208,10 @@ mod tests {
             }
             other => panic!("expected nested Dispatch, got {other:?}"),
         }
+        // CmpGt is now inside the Frame sub-program (not after outer DISPATCH)
         assert!(instrs.contains(&Instruction::CmpGt { reg: 0, imm: 0 }));
+        // Or accumulates across repeated elements
+        assert!(instrs.contains(&Instruction::Or));
     }
 
     #[test]
@@ -1449,13 +1509,13 @@ mod tests {
     fn emit_combined_shared_nested() {
         // Predicate and projection share a nested parent field
         let instrs = compile_and_decode("WHERE #3.#1 > 0 SELECT { #3 { #1 } }");
-        // Should have a single Frame for field 3, and the nested dispatch
-        // should contain both Copy for #1 (projection) and Decode for #1 (predicate).
-        match &instrs[0] {
+        // First: IsSet seed for repeated field accumulation
+        assert!(matches!(instrs[0], Instruction::IsSet { .. }));
+        // Then DISPATCH with Frame for field 3
+        match &instrs[1] {
             Instruction::Dispatch { arms, .. } => {
                 let arm3 = arms.iter().find(|a| a.match_ == ArmMatch::Field(3));
                 assert!(arm3.is_some(), "missing arm for field 3");
-                // Should have exactly one Frame action (not two)
                 let frame_count = arm3
                     .unwrap()
                     .actions
@@ -1466,10 +1526,10 @@ mod tests {
             }
             other => panic!("expected Dispatch, got {other:?}"),
         }
-        // Find the nested dispatch and verify it has Decode for field 1
+        // Nested dispatch has Decode+Copy for field 1
         let nested = instrs
             .iter()
-            .skip(1)
+            .skip(2)
             .find(|i| matches!(i, Instruction::Dispatch { .. }));
         match nested {
             Some(Instruction::Dispatch { arms, .. }) => {
@@ -1489,8 +1549,9 @@ mod tests {
             }
             other => panic!("expected nested Dispatch, got {other:?}"),
         }
-        // Verify predicate logic is present
+        // CmpGt + Or are inside the Frame sub-program
         assert!(instrs.contains(&Instruction::CmpGt { reg: 0, imm: 0 }));
+        assert!(instrs.contains(&Instruction::Or));
     }
 
     #[test]

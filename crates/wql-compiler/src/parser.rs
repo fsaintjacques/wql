@@ -600,7 +600,6 @@ fn keyword_to_str(kind: &TokenKind) -> &'static str {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
