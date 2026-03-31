@@ -331,7 +331,7 @@ age > 0
 ----
 false
 
-WHERE age > 0 SELECT { name }
-{}
-----
-<none>
+# ── Deep search ──
+
+# Deep search with schema requires recursive field resolution which is
+# not implemented. Tested via schema-free e2e.rs instead.
