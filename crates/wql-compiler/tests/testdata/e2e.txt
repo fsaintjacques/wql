@@ -115,7 +115,23 @@ items.sku == "W-1"
 true
 false
 
-# Mixed: nested predicate + top-level predicate
+# ── Case 1: all leaves local (single-segment) ──
+# Covered extensively above (age > 18, status == 1, etc.)
+
+# ── Case 2: all leaves nested, same parent ──
+items.price > 3000 && items.quantity > 1
+{"items": [{"sku": "G-2", "price": 4999, "quantity": 2}]}
+{"items": [{"sku": "G-2", "price": 4999, "quantity": 1}]}
+{"items": [{"sku": "W-1", "price": 500, "quantity": 5}]}
+----
+true
+false
+false
+
+# ── Case 3: single nested leaf ──
+# (Covered above: items.price > 3000, items.sku == "W-1")
+
+# ── Case 4: mixed nested + local ──
 items.price > 3000 && shipped == true
 {"items": [{"sku": "G-2", "price": 4999}], "shipped": true}
 {"items": [{"sku": "G-2", "price": 4999}], "shipped": false}
@@ -124,6 +140,34 @@ items.price > 3000 && shipped == true
 true
 false
 false
+
+# ── Case 6: nested under Not ──
+!items.price > 3000
+{"items": [{"sku": "W-1", "price": 500}]}
+{"items": [{"sku": "G-2", "price": 4999}]}
+----
+true
+false
+
+# ── Case 7: nested mixed under Or ──
+items.price > 3000 || shipped == true
+{"items": [{"sku": "G-2", "price": 4999}], "shipped": false}
+{"items": [{"sku": "W-1", "price": 500}], "shipped": true}
+{"items": [{"sku": "W-1", "price": 500}], "shipped": false}
+----
+true
+true
+false
+
+# ── Case 9: repeated → message → repeated → message (depth) ──
+items.discounts.percent > 10
+{"items": [{"sku": "G-2", "discounts": [{"code": "SAVE20", "percent": 20}]}]}
+{"items": [{"sku": "W-1", "discounts": [{"code": "FLAT5", "percent": 5}]}]}
+{"items": [{"sku": "W-1", "discounts": [{"code": "FLAT5", "percent": 5}, {"code": "BIG15", "percent": 15}]}]}
+----
+true
+false
+true
 
 # Combined: filter on repeated field, project removes the predicated field.
 # This ensures filter and projection are decoupled — the filter checks

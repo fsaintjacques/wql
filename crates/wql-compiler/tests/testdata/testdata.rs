@@ -53,6 +53,15 @@ pub struct LineItem {
     pub quantity: i32,
     #[prost(int64, tag = "3")]
     pub price: i64,
+    #[prost(message, repeated, tag = "4")]
+    pub discounts: ::prost::alloc::vec::Vec<Discount>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Discount {
+    #[prost(string, tag = "1")]
+    pub code: ::prost::alloc::string::String,
+    #[prost(int32, tag = "2")]
+    pub percent: i32,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]

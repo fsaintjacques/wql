@@ -41,4 +41,10 @@ message LineItem {
   string sku      = 1;
   int32  quantity  = 2;
   int64  price     = 3;
+  repeated Discount discounts = 4;
+}
+
+message Discount {
+  string code   = 1;
+  int32  percent = 2;
 }
