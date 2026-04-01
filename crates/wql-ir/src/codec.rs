@@ -261,9 +261,6 @@ impl Writer {
 
 const OP_DISPATCH: u8 = 0x00;
 const OP_LABEL: u8 = 0x01;
-const OP_COPY: u8 = 0x02;
-const OP_SKIP: u8 = 0x03;
-const OP_DECODE: u8 = 0x04;
 const OP_CMP_EQ: u8 = 0x05;
 const OP_CMP_NEQ: u8 = 0x06;
 const OP_CMP_LT: u8 = 0x07;
@@ -299,14 +296,11 @@ fn instruction_size(instr: &Instruction, label_offsets: &[u32]) -> usize {
 
     match instr {
         Instruction::Label
-        | Instruction::Copy
-        | Instruction::Skip
         | Instruction::And
         | Instruction::Or
         | Instruction::Not
         | Instruction::Return => 1,
 
-        Instruction::Decode { .. } => 3,
         Instruction::IsSet { .. } => 2,
 
         Instruction::CmpEq { imm, .. }
@@ -393,19 +387,10 @@ fn encode_instruction(w: &mut Writer, instr: &Instruction, label_offsets: &[u32]
 
     match instr {
         Instruction::Label => w.put_u8(OP_LABEL),
-        Instruction::Copy => w.put_u8(OP_COPY),
-        Instruction::Skip => w.put_u8(OP_SKIP),
         Instruction::And => w.put_u8(OP_AND),
         Instruction::Or => w.put_u8(OP_OR),
         Instruction::Not => w.put_u8(OP_NOT),
         Instruction::Return => w.put_u8(OP_RETURN),
-
-        Instruction::Decode { reg, encoding } => {
-            check_reg(*reg);
-            w.put_u8(OP_DECODE);
-            w.put_u8(*reg);
-            w.put_u8(*encoding as u8);
-        }
 
         Instruction::IsSet { reg } => {
             check_reg(*reg);
@@ -546,8 +531,7 @@ fn compute_register_count(instructions: &[Instruction]) -> u8 {
 
     for instr in instructions {
         match instr {
-            Instruction::Decode { reg, .. }
-            | Instruction::CmpEq { reg, .. }
+            Instruction::CmpEq { reg, .. }
             | Instruction::CmpNeq { reg, .. }
             | Instruction::CmpLt { reg, .. }
             | Instruction::CmpLte { reg, .. }
@@ -717,23 +701,10 @@ fn decode_instruction(r: &mut Reader<'_>, start_offset: usize) -> Result<Instruc
     let opcode = r.read_u8()?;
     match opcode {
         OP_LABEL => Ok(Instruction::Label),
-        OP_COPY => Ok(Instruction::Copy),
-        OP_SKIP => Ok(Instruction::Skip),
         OP_AND => Ok(Instruction::And),
         OP_OR => Ok(Instruction::Or),
         OP_NOT => Ok(Instruction::Not),
         OP_RETURN => Ok(Instruction::Return),
-
-        OP_DECODE => {
-            let reg = r.read_u8()?;
-            check_reg_decode(reg)?;
-            let enc = r.read_u8()?;
-            let encoding = Encoding::from_u8(enc).ok_or(DecodeError::UnknownOpcode {
-                offset: r.pos - 1,
-                opcode: enc,
-            })?;
-            Ok(Instruction::Decode { reg, encoding })
-        }
 
         OP_IS_SET => {
             let reg = r.read_u8()?;
@@ -1509,16 +1480,6 @@ mod tests {
                 Instruction::Return,
             ],
             &[OP_AND, OP_OR, OP_NOT, OP_RETURN],
-        );
-    }
-
-    // ─────────────────────────────────── Standalone Copy / Skip
-
-    #[test]
-    fn roundtrip_copy_skip() {
-        roundtrip_with_bytes(
-            &[Instruction::Copy, Instruction::Skip, Instruction::Return],
-            &[OP_COPY, OP_SKIP, OP_RETURN],
         );
     }
 

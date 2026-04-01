@@ -113,7 +113,7 @@ pub struct DispatchArm {
 
 // ───────────────────────────────────────────────── Instruction
 
-/// The complete WVM instruction set (22 instructions).
+/// The complete WVM instruction set.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
     // ── Control ──
@@ -122,14 +122,6 @@ pub enum Instruction {
         arms: Vec<DispatchArm>,
     },
     Label,
-
-    // ── Leaf actions ──
-    Copy,
-    Skip,
-    Decode {
-        reg: u8,
-        encoding: Encoding,
-    },
 
     // ── Predicate: integer comparisons ──
     CmpEq {

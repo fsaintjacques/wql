@@ -422,9 +422,6 @@ fn format_instruction(instr: &wql_ir::Instruction) -> String {
             }
         }
         Instruction::Label => "LABEL".into(),
-        Instruction::Copy => "COPY".into(),
-        Instruction::Skip => "SKIP".into(),
-        Instruction::Decode { reg, encoding } => format!("DECODE R{reg} {encoding:?}"),
         Instruction::CmpEq { reg, imm } => format!("CMP_EQ R{reg} {imm}"),
         Instruction::CmpNeq { reg, imm } => format!("CMP_NEQ R{reg} {imm}"),
         Instruction::CmpLt { reg, imm } => format!("CMP_LT R{reg} {imm}"),

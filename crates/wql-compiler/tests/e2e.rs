@@ -38,12 +38,6 @@ fn proto_varint(field: u32, val: u64) -> Vec<u8> {
     buf
 }
 
-/// Encode a zigzag-encoded sint field (wire type 0).
-fn proto_sint(field: u32, val: i64) -> Vec<u8> {
-    let zigzag = ((val << 1) ^ (val >> 63)) as u64;
-    proto_varint(field, zigzag)
-}
-
 /// Encode a length-delimited field (wire type 2).
 fn proto_len(field: u32, val: &[u8]) -> Vec<u8> {
     let mut buf = encode_tag(field, 2);
