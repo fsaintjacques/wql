@@ -1,3 +1,4 @@
+use prost_reflect::{DynamicMessage, MessageDescriptor};
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
@@ -44,6 +45,9 @@ Options (compile, eval):
   -m <message>     Root message type (required with -s)
   -o <output>      Output file (compile only; default: stdout)
   --delimited      Varint length-delimited stream mode (eval only)
+  --json           Output as JSON (eval only; requires -s and -m)
+                   Single mode: one JSON object. Delimited: JSONL (one per line).
+                   Filters print true/false per record.
 
 Single message mode (default):
   Reads one protobuf message from stdin, writes one result to stdout.
@@ -59,6 +63,8 @@ Examples:
   wqlc compile -q '{{ name, age }}' -o program.wql
   wqlc eval -q 'age > 18' < message.bin
   wqlc eval -q '{{ name }}' --delimited < stream.bin > filtered.bin
+  wqlc eval -q '{{ name }}' -s schema.bin -m pkg.Person --json < msg.bin
+  wqlc eval -q 'age > 18' -s schema.bin -m pkg.Person --json --delimited < stream.bin
   wqlc inspect program.wql"
     );
     ExitCode::from(2)
@@ -97,8 +103,21 @@ fn cmd_eval(args: &[String]) -> Result<ExitCode, String> {
     let opts = parse_common_opts(args, true)?;
     let query_str = opts.query.ok_or("missing -q <query>")?;
 
-    // Classify mode from the parsed AST, not string matching.
     let mode = classify_query(&query_str)?;
+
+    let json_encoder = if opts.json {
+        let schema_bytes = opts
+            .schema_bytes
+            .as_deref()
+            .ok_or("--json requires -s <schema.bin>")?;
+        let msg_name = opts
+            .message
+            .as_deref()
+            .ok_or("--json requires -m <message>")?;
+        Some(JsonEncoder::new(schema_bytes, msg_name)?)
+    } else {
+        None
+    };
 
     let compile_opts = build_compile_opts(opts.schema_bytes.as_deref(), opts.message.as_deref());
     let bytecode = wql_compiler::compile(&query_str, &compile_opts)
@@ -107,9 +126,9 @@ fn cmd_eval(args: &[String]) -> Result<ExitCode, String> {
         .map_err(|e| format!("load error: {e}"))?;
 
     if opts.delimited {
-        eval_delimited(&program, mode)
+        eval_delimited(&program, mode, json_encoder.as_ref())
     } else {
-        eval_single(&program, mode)
+        eval_single(&program, mode, json_encoder.as_ref())
     }
 }
 
@@ -118,6 +137,35 @@ enum QueryMode {
     Filter,
     Project,
     Combined,
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// JSON output encoder
+// ═══════════════════════════════════════════════════════════════════════
+
+struct JsonEncoder {
+    desc: MessageDescriptor,
+}
+
+impl JsonEncoder {
+    fn new(schema_bytes: &[u8], message_name: &str) -> Result<Self, String> {
+        let pool = prost_reflect::DescriptorPool::decode(schema_bytes)
+            .map_err(|e| format!("decode descriptor: {e}"))?;
+        let desc = pool
+            .get_message_by_name(message_name)
+            .ok_or_else(|| format!("message '{message_name}' not found in schema"))?;
+        Ok(Self { desc })
+    }
+
+    fn proto_to_json(&self, bytes: &[u8]) -> Result<String, String> {
+        let msg = DynamicMessage::decode(self.desc.clone(), bytes)
+            .map_err(|e| format!("decode proto: {e}"))?;
+        let opts = prost_reflect::SerializeOptions::new().skip_default_fields(true);
+        let value = msg
+            .serialize_with_options(serde_json::value::Serializer, &opts)
+            .map_err(|e| format!("serialize JSON: {e}"))?;
+        serde_json::to_string(&value).map_err(|e| format!("format JSON: {e}"))
+    }
 }
 
 fn classify_query(source: &str) -> Result<QueryMode, String> {
@@ -129,8 +177,13 @@ fn classify_query(source: &str) -> Result<QueryMode, String> {
     })
 }
 
-fn eval_single(program: &wql_runtime::LoadedProgram, mode: QueryMode) -> Result<ExitCode, String> {
+fn eval_single(
+    program: &wql_runtime::LoadedProgram,
+    mode: QueryMode,
+    json: Option<&JsonEncoder>,
+) -> Result<ExitCode, String> {
     let input = read_stdin()?;
+    let mut stdout = io::stdout().lock();
 
     match mode {
         QueryMode::Combined => {
@@ -139,9 +192,7 @@ fn eval_single(program: &wql_runtime::LoadedProgram, mode: QueryMode) -> Result<
                 .map_err(|e| format!("runtime error: {e}"))?;
             match result {
                 Some(len) => {
-                    io::stdout()
-                        .write_all(&output[..len])
-                        .map_err(|e| format!("write: {e}"))?;
+                    write_output(&mut stdout, &output[..len], json)?;
                     Ok(ExitCode::SUCCESS)
                 }
                 None => Ok(ExitCode::FAILURE),
@@ -150,6 +201,9 @@ fn eval_single(program: &wql_runtime::LoadedProgram, mode: QueryMode) -> Result<
         QueryMode::Filter => {
             let result =
                 wql_runtime::filter(program, &input).map_err(|e| format!("runtime error: {e}"))?;
+            if json.is_some() {
+                writeln!(stdout, "{result}").map_err(|e| format!("write: {e}"))?;
+            }
             if result {
                 Ok(ExitCode::SUCCESS)
             } else {
@@ -160,17 +214,44 @@ fn eval_single(program: &wql_runtime::LoadedProgram, mode: QueryMode) -> Result<
             let mut output = vec![0u8; input.len() * 2 + 256];
             let len = wql_runtime::project(program, &input, &mut output)
                 .map_err(|e| format!("runtime error: {e}"))?;
-            io::stdout()
-                .write_all(&output[..len])
-                .map_err(|e| format!("write: {e}"))?;
+            write_output(&mut stdout, &output[..len], json)?;
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+/// Write a record in streaming mode: JSON line or delimited proto.
+fn write_stream_output(
+    w: &mut impl Write,
+    proto_bytes: &[u8],
+    json: Option<&JsonEncoder>,
+) -> Result<(), String> {
+    if let Some(enc) = json {
+        let json_str = enc.proto_to_json(proto_bytes)?;
+        writeln!(w, "{json_str}").map_err(|e| format!("write: {e}"))
+    } else {
+        write_delimited_record(w, proto_bytes).map_err(|e| format!("write: {e}"))
+    }
+}
+
+/// Write a single output (non-streaming): JSON line or raw proto.
+fn write_output(
+    w: &mut impl Write,
+    proto_bytes: &[u8],
+    json: Option<&JsonEncoder>,
+) -> Result<(), String> {
+    if let Some(enc) = json {
+        let json_str = enc.proto_to_json(proto_bytes)?;
+        writeln!(w, "{json_str}").map_err(|e| format!("write: {e}"))
+    } else {
+        w.write_all(proto_bytes).map_err(|e| format!("write: {e}"))
     }
 }
 
 fn eval_delimited(
     program: &wql_runtime::LoadedProgram,
     mode: QueryMode,
+    json: Option<&JsonEncoder>,
 ) -> Result<ExitCode, String> {
     let mut stdin = io::BufReader::new(io::stdin().lock());
     let mut stdout = io::BufWriter::new(io::stdout().lock());
@@ -207,13 +288,14 @@ fn eval_delimited(
             QueryMode::Project => {
                 let len = wql_runtime::project(program, &record_buf, &mut output_buf)
                     .map_err(|e| format!("record {i}: project error: {e}"))?;
-                write_delimited_record(&mut stdout, &output_buf[..len])
-                    .map_err(|e| format!("write: {e}"))?;
+                write_stream_output(&mut stdout, &output_buf[..len], json)?;
             }
             QueryMode::Filter => {
                 let pass = wql_runtime::filter(program, &record_buf)
                     .map_err(|e| format!("record {i}: filter error: {e}"))?;
-                if pass {
+                if json.is_some() {
+                    writeln!(stdout, "{pass}").map_err(|e| format!("write: {e}"))?;
+                } else if pass {
                     write_delimited_record(&mut stdout, &record_buf)
                         .map_err(|e| format!("write: {e}"))?;
                 }
@@ -222,8 +304,9 @@ fn eval_delimited(
                 let result = wql_runtime::project_and_filter(program, &record_buf, &mut output_buf)
                     .map_err(|e| format!("record {i}: runtime error: {e}"))?;
                 if let Some(len) = result {
-                    write_delimited_record(&mut stdout, &output_buf[..len])
-                        .map_err(|e| format!("write: {e}"))?;
+                    write_stream_output(&mut stdout, &output_buf[..len], json)?;
+                } else if json.is_some() {
+                    writeln!(stdout, "null").map_err(|e| format!("write: {e}"))?;
                 }
             }
         }
@@ -418,6 +501,7 @@ struct Opts {
     message: Option<String>,
     output: Option<String>,
     delimited: bool,
+    json: bool,
 }
 
 fn parse_common_opts(args: &[String], allow_delimited: bool) -> Result<Opts, String> {
@@ -426,6 +510,7 @@ fn parse_common_opts(args: &[String], allow_delimited: bool) -> Result<Opts, Str
     let mut message = None;
     let mut output = None;
     let mut delimited = false;
+    let mut json = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -452,6 +537,12 @@ fn parse_common_opts(args: &[String], allow_delimited: bool) -> Result<Opts, Str
                 }
                 delimited = true;
             }
+            "--json" => {
+                if !allow_delimited {
+                    return Err("--json is only supported with 'eval'".into());
+                }
+                json = true;
+            }
             other => return Err(format!("unknown option '{other}'")),
         }
         i += 1;
@@ -467,6 +558,7 @@ fn parse_common_opts(args: &[String], allow_delimited: bool) -> Result<Opts, Str
         message,
         output,
         delimited,
+        json,
     })
 }
 

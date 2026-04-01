@@ -8,9 +8,11 @@ name = "wqlc"
 path = "src/main.rs"
 
 [dependencies]
-wql-compiler = { workspace = true }
-wql-runtime  = { workspace = true }
-wql-ir       = { workspace = true }
+wql-compiler  = { workspace = true }
+wql-runtime   = { workspace = true }
+wql-ir        = { workspace = true }
+prost-reflect = { version = "0.14", features = ["serde"] }
+serde_json    = "1"
 
 [dev-dependencies]
 prost         = "0.13"
