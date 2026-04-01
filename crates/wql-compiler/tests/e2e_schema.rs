@@ -123,11 +123,13 @@ fn sample_order() -> testdata::Order {
                 sku: "WIDGET-1".into(),
                 quantity: 2,
                 price: 1999,
+                discounts: vec![],
             },
             testdata::LineItem {
                 sku: "GADGET-2".into(),
                 quantity: 1,
                 price: 4999,
+                discounts: vec![],
             },
         ],
         total_cents: 8997,

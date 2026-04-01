@@ -335,6 +335,8 @@ fn emit_nested_predicate_dispatches(
     deferred: Vec<DeferredPredicateNested>,
     pred: &BoundPredicate,
     field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
+    // Explicit group key from the parent, or None to auto-detect from field_map.
+    parent_group: Option<u32>,
 ) -> Result<(), CompileError> {
     for nested in deferred {
         emitter.push(Instruction::Label);
@@ -391,72 +393,51 @@ fn emit_nested_predicate_dispatches(
             arms,
         });
 
-        // Emit only the predicate leaves whose registers are decoded in this Frame,
-        // then Or to accumulate across repeated element invocations (ANY semantics).
-        let local_regs: Vec<u8> = nested.fields.iter().map(|f| f.reg).collect();
-        emit_predicate_leaves_for_regs(emitter, pred, field_map, &local_regs)?;
-        emitter.push(Instruction::Or);
+        // Emit per-element predicate for this Frame group + Or for ANY accumulation.
+        let group = parent_group.unwrap_or_else(|| {
+            field_map
+                .values()
+                .find(|info| info.path.len() > 1 && nested.fields.iter().any(|f| f.reg == info.reg))
+                .map(|info| info.path[0])
+                .expect("Frame must correspond to a field_map entry")
+        });
+        let did_emit = emit_frame_predicate(emitter, pred, field_map, group)?;
+        if did_emit {
+            emitter.push(Instruction::Or);
+        }
 
         emitter.push(Instruction::Return);
 
         if !sub_deferred.is_empty() {
-            emit_nested_predicate_dispatches(emitter, sub_deferred, pred, field_map)?;
+            emit_nested_predicate_dispatches(emitter, sub_deferred, pred, field_map, Some(group))?;
         }
     }
     Ok(())
 }
 
-/// Emit only the predicate leaf comparisons whose registers are in `regs`.
-/// For compound predicates (And/Or/Not), emits the sub-tree only if it
-/// contains relevant leaves. Returns true if anything was emitted.
-fn emit_predicate_leaves_for_regs(
-    emitter: &mut Emitter,
-    pred: &BoundPredicate,
-    field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
-    regs: &[u8],
-) -> Result<bool, CompileError> {
-    match &pred.kind {
-        BoundPredicateKind::And(l, r) => {
-            let left = emit_predicate_leaves_for_regs(emitter, l, field_map, regs)?;
-            let right = emit_predicate_leaves_for_regs(emitter, r, field_map, regs)?;
-            if left && right {
-                emitter.push(Instruction::And);
-            }
-            Ok(left || right)
-        }
-        BoundPredicateKind::Or(l, r) => {
-            let left = emit_predicate_leaves_for_regs(emitter, l, field_map, regs)?;
-            let right = emit_predicate_leaves_for_regs(emitter, r, field_map, regs)?;
-            if left && right {
-                emitter.push(Instruction::Or);
-            }
-            Ok(left || right)
-        }
-        BoundPredicateKind::Not(inner) => {
-            let inner_emitted = emit_predicate_leaves_for_regs(emitter, inner, field_map, regs)?;
-            if inner_emitted {
-                emitter.push(Instruction::Not);
-            }
-            Ok(inner_emitted)
-        }
-        _ => {
-            let reg = predicate_leaf_reg(pred, field_map);
-            if let Some(r) = reg {
-                if regs.contains(&r) {
-                    emit_predicate_logic(emitter, pred, field_map, false)?;
-                    return Ok(true);
-                }
-            }
-            Ok(false)
-        }
-    }
-}
+// ═══════════════════════════════════════════════════════════════════════
+// Predicate tree classification and split emission
+// ═══════════════════════════════════════════════════════════════════════
+//
+// Predicate trees may reference fields at different nesting depths:
+// - Local leaves: single-segment paths (e.g., `shipped == true`)
+// - Nested leaves: multi-segment paths (e.g., `items.price > 3000`)
+//
+// Nested leaves are decoded inside Frame sub-programs. For repeated fields,
+// each Frame invocation evaluates the per-element predicate and Or-accumulates
+// the result (ANY semantics).
+//
+// Classification:
+// - `Local`: all descendants are local leaves
+// - `Nested(group)`: all descendants share the same first path segment
+// - `Mixed`: descendants span local + nested, or different nested groups
+//
+// A Nested sub-tree is emitted inside its Frame. The outer tree sees it as a
+// single "already on stack" value. Not(Nested) is Mixed — the Not is outer,
+// ensuring `!items.price > 3000` means "NOT ANY" not "ANY NOT".
 
-/// Get the register used by a predicate leaf, if any.
-fn predicate_leaf_reg(
-    pred: &BoundPredicate,
-    field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
-) -> Option<u8> {
+/// The first path segment of a nested field (the Frame group key).
+fn nested_group(pred: &BoundPredicate) -> Option<u32> {
     let segments = match &pred.kind {
         BoundPredicateKind::Comparison { field, .. }
         | BoundPredicateKind::Presence(field)
@@ -464,47 +445,174 @@ fn predicate_leaf_reg(
         | BoundPredicateKind::StringPredicate { field, .. } => &field.segments,
         _ => return None,
     };
-    field_map.get(segments).map(|info| info.reg)
-}
-
-/// Check if a predicate leaf references a multi-segment (nested) field.
-fn is_nested_predicate_leaf(pred: &BoundPredicate) -> bool {
-    match &pred.kind {
-        BoundPredicateKind::Comparison { field, .. }
-        | BoundPredicateKind::Presence(field)
-        | BoundPredicateKind::InSet { field, .. }
-        | BoundPredicateKind::StringPredicate { field, .. } => field.segments.len() > 1,
-        _ => false,
+    if segments.len() > 1 {
+        Some(segments[0])
+    } else {
+        None
     }
 }
 
-/// Emit predicate comparison/logic instructions in post-order.
-/// When `skip_nested` is true, multi-segment leaf predicates are skipped
-/// (their results are already on the bool stack from Frame evaluation).
-fn emit_predicate_logic(
+#[derive(Debug, Clone, PartialEq)]
+enum PredClass {
+    Local,
+    Nested(u32),
+    Mixed,
+}
+
+/// Classify a predicate node bottom-up.
+fn classify_predicate(pred: &BoundPredicate) -> PredClass {
+    match &pred.kind {
+        BoundPredicateKind::And(l, r) | BoundPredicateKind::Or(l, r) => {
+            let lc = classify_predicate(l);
+            let rc = classify_predicate(r);
+            match (&lc, &rc) {
+                (PredClass::Nested(g1), PredClass::Nested(g2)) if g1 == g2 => {
+                    PredClass::Nested(*g1)
+                }
+                (PredClass::Local, PredClass::Local) => PredClass::Local,
+                _ => PredClass::Mixed,
+            }
+        }
+        // Not is always outer — ensures NOT(ANY(...)) semantics, not ANY(NOT(...))
+        BoundPredicateKind::Not(inner) => {
+            let ic = classify_predicate(inner);
+            match ic {
+                PredClass::Local => PredClass::Local,
+                _ => PredClass::Mixed,
+            }
+        }
+        _ => {
+            if let Some(g) = nested_group(pred) {
+                PredClass::Nested(g)
+            } else {
+                PredClass::Local
+            }
+        }
+    }
+}
+
+/// Emit the "outer" predicate tree, replacing Nested sub-trees with no-ops
+/// (their values are already on the bool stack from Frame evaluation).
+fn emit_outer_predicate(
     emitter: &mut Emitter,
     pred: &BoundPredicate,
     field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
-    skip_nested: bool,
+) -> Result<(), CompileError> {
+    let class = classify_predicate(pred);
+    match class {
+        PredClass::Nested(_) => {
+            // Entire sub-tree was evaluated inside a Frame — value on stack.
+        }
+        PredClass::Local => {
+            // Pure local sub-tree — emit all nodes.
+            emit_predicate_full(emitter, pred, field_map)?;
+        }
+        PredClass::Mixed => match &pred.kind {
+            BoundPredicateKind::And(l, r) => {
+                emit_outer_predicate(emitter, l, field_map)?;
+                emit_outer_predicate(emitter, r, field_map)?;
+                emitter.push(Instruction::And);
+            }
+            BoundPredicateKind::Or(l, r) => {
+                emit_outer_predicate(emitter, l, field_map)?;
+                emit_outer_predicate(emitter, r, field_map)?;
+                emitter.push(Instruction::Or);
+            }
+            BoundPredicateKind::Not(inner) => {
+                emit_outer_predicate(emitter, inner, field_map)?;
+                emitter.push(Instruction::Not);
+            }
+            _ => {
+                // Mixed leaf — must be local (nested leaves are PredClass::Nested)
+                emit_predicate_leaf(emitter, pred, field_map)?;
+            }
+        },
+    }
+    Ok(())
+}
+
+/// Emit the per-element predicate for a Frame group. Only emits nodes
+/// classified as Nested(group). Returns true if anything was emitted.
+fn emit_frame_predicate(
+    emitter: &mut Emitter,
+    pred: &BoundPredicate,
+    field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
+    group: u32,
+) -> Result<bool, CompileError> {
+    let class = classify_predicate(pred);
+    match class {
+        PredClass::Nested(g) if g == group => {
+            // This entire sub-tree belongs to our group — emit it fully.
+            emit_predicate_full(emitter, pred, field_map)?;
+            Ok(true)
+        }
+        PredClass::Nested(_) | PredClass::Local => Ok(false),
+        PredClass::Mixed => match &pred.kind {
+            BoundPredicateKind::And(l, r) => {
+                let left = emit_frame_predicate(emitter, l, field_map, group)?;
+                let right = emit_frame_predicate(emitter, r, field_map, group)?;
+                if left && right {
+                    emitter.push(Instruction::And);
+                }
+                Ok(left || right)
+            }
+            BoundPredicateKind::Or(l, r) => {
+                let left = emit_frame_predicate(emitter, l, field_map, group)?;
+                let right = emit_frame_predicate(emitter, r, field_map, group)?;
+                if left && right {
+                    emitter.push(Instruction::Or);
+                }
+                Ok(left || right)
+            }
+            BoundPredicateKind::Not(inner) => {
+                // Not is outer — descend into child to find nested leaves.
+                // The child should be Nested (Not promotes Nested to Mixed),
+                // never itself Mixed (that would require Not(And(Nested, Local))
+                // which the grammar can produce but would need And emission here).
+                debug_assert!(
+                    classify_predicate(inner) != PredClass::Mixed,
+                    "Not(Mixed) in Frame context is not supported"
+                );
+                emit_frame_predicate(emitter, inner, field_map, group)
+            }
+            _ => Ok(false),
+        },
+    }
+}
+
+/// Emit a predicate sub-tree unconditionally (all nodes, no skipping).
+fn emit_predicate_full(
+    emitter: &mut Emitter,
+    pred: &BoundPredicate,
+    field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
 ) -> Result<(), CompileError> {
     match &pred.kind {
         BoundPredicateKind::And(l, r) => {
-            emit_predicate_logic(emitter, l, field_map, skip_nested)?;
-            emit_predicate_logic(emitter, r, field_map, skip_nested)?;
+            emit_predicate_full(emitter, l, field_map)?;
+            emit_predicate_full(emitter, r, field_map)?;
             emitter.push(Instruction::And);
         }
         BoundPredicateKind::Or(l, r) => {
-            emit_predicate_logic(emitter, l, field_map, skip_nested)?;
-            emit_predicate_logic(emitter, r, field_map, skip_nested)?;
+            emit_predicate_full(emitter, l, field_map)?;
+            emit_predicate_full(emitter, r, field_map)?;
             emitter.push(Instruction::Or);
         }
         BoundPredicateKind::Not(inner) => {
-            emit_predicate_logic(emitter, inner, field_map, skip_nested)?;
+            emit_predicate_full(emitter, inner, field_map)?;
             emitter.push(Instruction::Not);
         }
-        _ if skip_nested && is_nested_predicate_leaf(pred) => {
-            // Result already on the bool stack from Frame Or-accumulation.
-        }
+        _ => emit_predicate_leaf(emitter, pred, field_map)?,
+    }
+    Ok(())
+}
+
+/// Emit a single predicate leaf (comparison, presence, in-set, string op).
+fn emit_predicate_leaf(
+    emitter: &mut Emitter,
+    pred: &BoundPredicate,
+    field_map: &HashMap<Vec<u32>, FieldDecodeInfo>,
+) -> Result<(), CompileError> {
+    match &pred.kind {
         BoundPredicateKind::Comparison { field, op, value } => {
             let reg = field_map[&field.segments].reg;
             emit_comparison(emitter, reg, *op, value)?;
@@ -549,6 +657,7 @@ fn emit_predicate_logic(
                 }
             }
         }
+        _ => {} // And/Or/Not handled by callers
     }
     Ok(())
 }
@@ -625,8 +734,7 @@ fn emit_predicate_program(
 
     let has_nested = field_map.values().any(|info| info.path.len() > 1);
 
-    // Seed false on the bool stack for each nested predicate group.
-    // IsSet on an unused register pushes false.
+    // Seed false on the bool stack for each nested Frame group.
     if has_nested {
         let seed_reg = emitter.alloc_register()?;
         emitter.push(Instruction::IsSet { reg: seed_reg });
@@ -639,12 +747,11 @@ fn emit_predicate_program(
         arms,
     });
 
-    // Emit only single-segment (non-nested) predicate logic after the DISPATCH.
-    // Multi-segment predicates are evaluated inside their Frame sub-programs.
-    emit_predicate_logic(emitter, pred, &field_map, has_nested)?;
+    // Emit the outer predicate tree (Nested sub-trees are no-ops — on stack from Frames).
+    emit_outer_predicate(emitter, pred, &field_map)?;
     emitter.push(Instruction::Return);
 
-    emit_nested_predicate_dispatches(emitter, deferred, pred, &field_map)?;
+    emit_nested_predicate_dispatches(emitter, deferred, pred, &field_map, None)?;
 
     Ok(())
 }
@@ -686,7 +793,7 @@ fn emit_combined(
         arms: merged_arms,
     });
 
-    emit_predicate_logic(emitter, pred, &field_map, has_nested)?;
+    emit_outer_predicate(emitter, pred, &field_map)?;
     emitter.push(Instruction::Return);
 
     // Emit deferred nested sub-programs for projection, injecting any
@@ -698,7 +805,7 @@ fn emit_combined(
     }
 
     // Emit deferred nested dispatches for predicate
-    emit_nested_predicate_dispatches(emitter, pred_deferred, pred, &field_map)?;
+    emit_nested_predicate_dispatches(emitter, pred_deferred, pred, &field_map, None)?;
 
     Ok(())
 }
@@ -929,10 +1036,18 @@ fn emit_combined_nested_projection(
 
     emitter.push(Instruction::Dispatch { default, arms });
 
-    // Emit only the predicate leaves for registers decoded in this Frame.
-    let local_regs: Vec<u8> = pred_fields.iter().map(|f| f.reg).collect();
-    emit_predicate_leaves_for_regs(emitter, pred, field_map, &local_regs)?;
-    emitter.push(Instruction::Or);
+    // Emit per-element predicate for this Frame group + Or for ANY accumulation.
+    let group = pred_fields[0].remaining_path[0];
+    // The group key in field_map is the original first segment, not remaining_path.
+    // Find it from the pred_fields' register → field_map lookup.
+    let frame_group = field_map
+        .values()
+        .find(|info| info.path.len() > 1 && pred_fields.iter().any(|pf| pf.reg == info.reg))
+        .map_or(group, |info| info.path[0]);
+    let did_emit = emit_frame_predicate(emitter, pred, field_map, frame_group)?;
+    if did_emit {
+        emitter.push(Instruction::Or);
+    }
 
     emitter.push(Instruction::Return);
 
