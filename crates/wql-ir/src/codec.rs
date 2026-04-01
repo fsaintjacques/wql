@@ -205,6 +205,7 @@ impl<'a> Reader<'a> {
         Ok(v)
     }
 
+    #[allow(dead_code)]
     fn skip_bytes(&mut self) -> Result<(), DecodeError> {
         let len = self.read_uvarint_as_usize()?;
         if self.pos + len > self.buf.len() {

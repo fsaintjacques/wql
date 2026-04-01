@@ -201,10 +201,8 @@ fn eval_single(
         QueryMode::Filter => {
             let result =
                 wql_runtime::filter(program, &input).map_err(|e| format!("runtime error: {e}"))?;
-            if json.is_some() {
-                writeln!(stdout, "{result}").map_err(|e| format!("write: {e}"))?;
-            }
             if result {
+                write_output(&mut stdout, &input, json)?;
                 Ok(ExitCode::SUCCESS)
             } else {
                 Ok(ExitCode::FAILURE)
@@ -293,11 +291,8 @@ fn eval_delimited(
             QueryMode::Filter => {
                 let pass = wql_runtime::filter(program, &record_buf)
                     .map_err(|e| format!("record {i}: filter error: {e}"))?;
-                if json.is_some() {
-                    writeln!(stdout, "{pass}").map_err(|e| format!("write: {e}"))?;
-                } else if pass {
-                    write_delimited_record(&mut stdout, &record_buf)
-                        .map_err(|e| format!("write: {e}"))?;
+                if pass {
+                    write_stream_output(&mut stdout, &record_buf, json)?;
                 }
             }
             QueryMode::Combined => {
@@ -305,8 +300,6 @@ fn eval_delimited(
                     .map_err(|e| format!("record {i}: runtime error: {e}"))?;
                 if let Some(len) = result {
                     write_stream_output(&mut stdout, &output_buf[..len], json)?;
-                } else if json.is_some() {
-                    writeln!(stdout, "null").map_err(|e| format!("write: {e}"))?;
                 }
             }
         }
