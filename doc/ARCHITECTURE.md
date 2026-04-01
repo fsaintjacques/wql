@@ -28,18 +28,16 @@ wql/
 │   ├── wql-runtime/             # interpreter (no_std + alloc)
 │   ├── wql-compiler/            # parser, type checker, IR emitter (std)
 │   ├── wql-capi/                # C FFI → libwql (std, cdylib)
-│   └── wql-wasm/                # WASM program shell (no_std, wasm32)
+│   └── wqlc/                    # CLI: compile, eval, inspect
 ├── bindings/
-│   ├── include/
-│   │   └── wql.h                # generated C header (stable ABI)
-│   ├── go/                      # CGO wrapper + Go API
-│   └── java/                    # JNI wrapper + Java API
-├── tools/
-│   └── wqlc/                    # CLI: compile .wql → .wqlbc or .wasm
-├── tests/
-│   └── integration/             # cross-crate correctness tests
+│   └── include/                 # C header (stable ABI)
 └── doc/
 ```
+
+**Planned but not yet implemented:**
+- `crates/wql-wasm/` — WASM program shell (no_std, wasm32)
+- `bindings/go/` — CGO wrapper + Go API
+- `bindings/java/` — JNI wrapper + Java API
 
 ---
 
@@ -55,8 +53,7 @@ wql-ir  (no_std + alloc)
     │         └── prost-types (FileDescriptorSet for schema binding)
     │
     ├──▶ wql-capi     (std, cdylib)   depends on: wql-runtime + wql-compiler
-    ├──▶ wql-wasm     (no_std, wasm)  depends on: wql-runtime only
-    └──▶ tools/wqlc   (std, binary)   depends on: wql-compiler only
+    └──▶ wqlc         (std, binary)   depends on: wql-compiler + wql-runtime + wql-ir
 ```
 
 `wql-runtime` does not depend on `wql-compiler`. The runtime is a pure consumer of bytecode bytes. The compiler is a pure producer. Neither knows about the other.
@@ -72,8 +69,8 @@ wql-ir  (no_std + alloc)
 **Key types:**
 
 - `Instruction` — structured enum with one variant per opcode; carries typed operands. Used by the compiler to build programs; not used directly by the runtime (which decodes from bytes).
-- `Program<'a>` — a newtype over `&'a [u8]`. The runtime holds a `Program<'a>` borrowing from a caller-managed byte slice. Construction is via `Program::decode`.
-- `ProgramHeader` — fixed 12-byte prefix of every encoded program:
+- `Program<'a>` — a validated view over `&'a [u8]`. Construction is via `Program::decode`. Used by `wql-ir` for zero-copy access to raw bytecode.
+- `ProgramHeader` — fixed 14-byte prefix of every encoded program:
 
   ```
   magic:          [u8; 4]  = b"WQL\x00"
@@ -108,15 +105,16 @@ wql-ir  (no_std + alloc)
 **Public API:**
 
 ```rust
-fn filter(program: &Program, input: &[u8]) -> bool;
-fn project(program: &Program, input: &[u8], output: &mut [u8]) -> usize;
-fn project_and_filter(program: &Program, input: &[u8], output: &mut [u8]) -> Option<usize>;
+fn filter(program: &LoadedProgram, input: &[u8]) -> Result<bool, RuntimeError>;
+fn project(program: &LoadedProgram, input: &[u8], output: &mut [u8]) -> Result<usize, RuntimeError>;
+fn project_and_filter(program: &LoadedProgram, input: &[u8], output: &mut [u8]) -> Result<Option<usize>, RuntimeError>;
 ```
 
 All three delegate to a single internal function:
 
 ```rust
-fn execute(program: &Program, input: &[u8], output: &mut [u8]) -> (bool, usize)
+fn execute(&mut self, pc: usize, input: &[u8], output: &mut [u8], out_cursor: usize)
+    -> Result<(bool, usize), RuntimeError>
 ```
 
 The output buffer is written during the scan unconditionally. If the bool result is false, the buffer contents are undefined; the caller must not read them.

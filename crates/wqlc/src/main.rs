@@ -47,7 +47,6 @@ Options (compile, eval):
   --delimited      Varint length-delimited stream mode (eval only)
   --json           Output as JSON (eval only; requires -s and -m)
                    Single mode: one JSON object. Delimited: JSONL (one per line).
-                   Filters print true/false per record.
 
 Single message mode (default):
   Reads one protobuf message from stdin, writes one result to stdout.

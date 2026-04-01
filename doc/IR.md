@@ -14,7 +14,7 @@
 
 This document specifies the Wire VM (WVM) intermediate representation — the instruction set that all WQL programs compile to. WVM is the boundary between the front-end language (CEL subset for predicates; a struct-expression DSL for projections) and the back-end execution environment (WASM interpreter, future JIT).
 
-The IR is intentionally small: 22 instructions. It is designed to express exactly two operations over a protobuf wire byte sequence — predicate evaluation and field projection — while maintaining the invariant that both execute in a single forward pass with no deserialization.
+The IR is intentionally small: 19 instructions. It is designed to express exactly two operations over a protobuf wire byte sequence — predicate evaluation and field projection — while maintaining the invariant that both execute in a single forward pass with no deserialization.
 
 ---
 
@@ -90,22 +90,14 @@ The **default action** applies to every field that matches no explicit arm:
 | `COPY` | Emit tag + raw value bytes verbatim to output buffer. Unknown fields are preserved. Safe for schema evolution. |
 | `RECURSE(P)` | If `wire_type == LEN`: push new scan window, run program P inside it, emit tag + reframed length + sub-output. If `wire_type != LEN`: `SKIP`. Used for deep (`..`) search. |
 
-### 5.2 Leaf actions
-
-| Instruction | Operands | Description |
-|---|---|---|
-| `COPY` | — | Emit current tag + raw value bytes to output buffer. No decoding. Increments output cursor. |
-| `SKIP` | — | Consume current value bytes, emit nothing. |
-| `DECODE` | `reg, encoding` | Decode current value into register `reg`. Leaves cursor past the value. Encodings: `VARINT`, `SINT` (zigzag), `I32`, `I64`, `LEN`. |
-
-### 5.3 Sub-message scope — `FRAME`
+### 5.2 Sub-message scope — `FRAME`
 
 | Instruction | Operands | Description |
 |---|---|---|
 | `FRAME(prog)` | program reference | Current field must have wire type `LEN`. Read length prefix N. Push a new scan window of N bytes and a fresh output buffer. Run `prog` inside the new scope. On exit: prepend new length varint to sub-output; append `tag + length + sub-output` to parent output buffer. Pop scan window. |
 | `LABEL(name)` | name string | Declares a named program entry point. Required target for `RECURSE(P)`. Programs are referenced by label, not by bytecode offset, to support self-referential programs. |
 
-### 5.4 Predicate evaluation
+### 5.3 Predicate evaluation
 
 These instructions execute after the `DISPATCH` loop has finished loading registers. They operate on the bool stack.
 
@@ -128,7 +120,7 @@ These instructions execute after the `DISPATCH` loop has finished loading regist
 | `OR` | — | Pop two bools, push their disjunction. |
 | `NOT` | — | Pop one bool, push its negation. |
 
-### 5.5 Return
+### 5.4 Return
 
 | Instruction | Description |
 |---|---|
@@ -288,9 +280,6 @@ The binary encoding of WVM bytecode is not yet finalised. The following conventi
 | `DISPATCH` | Control | `default: SKIP\|COPY\|RECURSE(label)`; arm list |
 | `FRAME` | Scope | program reference (label or inline) |
 | `LABEL` | Scope | name |
-| `COPY` | Leaf action | — |
-| `SKIP` | Leaf action | — |
-| `DECODE` | Leaf action | `reg, encoding` |
 | `CMP_EQ` | Predicate | `reg, imm` |
 | `CMP_NEQ` | Predicate | `reg, imm` |
 | `CMP_LT` | Predicate | `reg, imm` |
