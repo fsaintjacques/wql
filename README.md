@@ -120,6 +120,13 @@ A projection selects which fields to keep in the output, wrapped in braces.
 { .. -payload, -thumbnail }        -- keep all except these fields
 ```
 
+**Deep exclusion** (`..-field`) — remove a field at every nesting depth (requires schema):
+
+```
+{ ..-secret, .. }                  -- remove "secret" from all levels
+{ name, ..-internal, .. }          -- keep name, remove "internal" everywhere
+```
+
 ### Predicates
 
 A predicate is a boolean expression over field values.

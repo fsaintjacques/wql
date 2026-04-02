@@ -98,6 +98,9 @@ pub enum CompileError {
 
     /// Same field path used with conflicting encodings.
     ConflictingEncoding { field: String },
+
+    /// Deep exclusion (`..-field`) requires a schema to expand.
+    DeepExclusionWithoutSchema { span: Span },
 }
 
 impl From<ParseError> for CompileError {
@@ -166,6 +169,13 @@ impl std::fmt::Display for CompileError {
             }
             Self::ConflictingEncoding { field } => {
                 write!(f, "field '{field}' used with conflicting encodings")
+            }
+            Self::DeepExclusionWithoutSchema { span } => {
+                write!(
+                    f,
+                    "deep exclusion (..-field) at byte {}..{} requires a schema",
+                    span.start, span.end
+                )
             }
         }
     }

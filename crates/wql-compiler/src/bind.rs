@@ -157,10 +157,19 @@ fn bind_projection_sf(proj: &Projection) -> Result<BoundProjection, CompileError
         ProjectionKind::Strict { items } => BoundProjectionKind::Strict {
             items: bind_items_sf(items)?,
         },
-        ProjectionKind::Copy { items, exclusions } => BoundProjectionKind::Copy {
-            items: bind_items_sf(items)?,
-            exclusions: bind_excl_sf(exclusions)?,
-        },
+        ProjectionKind::Copy {
+            items,
+            exclusions,
+            deep_exclusions,
+        } => {
+            if let Some(f) = deep_exclusions.first() {
+                return Err(CompileError::DeepExclusionWithoutSchema { span: f.span() });
+            }
+            BoundProjectionKind::Copy {
+                items: bind_items_sf(items)?,
+                exclusions: bind_excl_sf(exclusions)?,
+            }
+        }
     };
     Ok(BoundProjection {
         kind,
@@ -636,7 +645,11 @@ fn bind_projection_schema(
                 .collect::<Result<Vec<_>, CompileError>>()?;
             BoundProjectionKind::Strict { items: bound_items }
         }
-        ProjectionKind::Copy { items, exclusions } => {
+        ProjectionKind::Copy {
+            items,
+            exclusions,
+            deep_exclusions,
+        } => {
             let bound_items = items
                 .iter()
                 .map(|item| bind_projection_item_schema(item, msg, fds))
@@ -648,9 +661,16 @@ fn bind_projection_schema(
                     Ok(num)
                 })
                 .collect::<Result<Vec<_>, CompileError>>()?;
-            BoundProjectionKind::Copy {
-                items: bound_items,
-                exclusions: bound_excl,
+
+            if deep_exclusions.is_empty() {
+                BoundProjectionKind::Copy {
+                    items: bound_items,
+                    exclusions: bound_excl,
+                }
+            } else {
+                expand_deep_exclusions(
+                    bound_items, bound_excl, deep_exclusions, msg, fds,
+                )?
             }
         }
     };
@@ -658,6 +678,283 @@ fn bind_projection_schema(
         kind,
         span: proj.span,
     })
+}
+
+/// Expand `..-field` deep exclusions into a regular Copy projection tree.
+///
+/// Walks the message schema tree and, for every sub-message field that
+/// transitively contains a deep-excluded field name, generates a Nested
+/// item with a Copy sub-projection carrying the exclusion. Fields that
+/// already have explicit Nested items in `items` get the exclusion merged
+/// into their sub-projection.
+fn expand_deep_exclusions(
+    mut items: Vec<BoundProjectionItem>,
+    mut exclusions: Vec<u32>,
+    deep_exclusions: &[FieldRef],
+    msg: &DescriptorProto,
+    fds: &FileDescriptorSet,
+) -> Result<BoundProjectionKind, CompileError> {
+    // Resolve deep exclusion field names to their target name strings.
+    // We search by name (not number) so the same name matches at any level.
+    let target_names: Vec<String> = deep_exclusions
+        .iter()
+        .map(|f| match f {
+            FieldRef::Name(name, _) => Ok(name.clone()),
+            FieldRef::Number(n, span) => {
+                // For numbered fields, look up the name in the current message
+                let fd = find_field_by_number(msg, *n).ok_or_else(|| {
+                    CompileError::UnresolvedField {
+                        field: format!("#{n}"),
+                        span: *span,
+                    }
+                })?;
+                Ok(fd.name.clone().unwrap_or_else(|| format!("#{n}")))
+            }
+        })
+        .collect::<Result<Vec<_>, CompileError>>()?;
+
+    // Add top-level exclusions for fields that exist at the current level.
+    for name in &target_names {
+        if let Some(fd) = find_field_by_name(msg, name) {
+            #[allow(clippy::cast_sign_loss)]
+            let num = fd.number.unwrap_or(0) as u32;
+            if !exclusions.contains(&num) {
+                exclusions.push(num);
+            }
+        }
+    }
+
+    // Collect field numbers that already have Nested items.
+    let existing_nested: std::collections::HashSet<u32> = items
+        .iter()
+        .filter_map(|item| match item {
+            BoundProjectionItem::Nested { field, .. } => Some(field.field_num),
+            _ => None,
+        })
+        .collect();
+
+    // For every sub-message field, check if deep exclusions need to be
+    // threaded into it.
+    for fd in &msg.field {
+        if fd.r#type() != ProtoType::Message {
+            continue;
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let field_num = fd.number.unwrap_or(0) as u32;
+
+        let type_name = fd.type_name.as_deref().unwrap_or("");
+        let nested_msg = match resolve_type_name(fds, type_name) {
+            Some(m) => m,
+            None => continue,
+        };
+
+        // Check if any deep exclusion target exists transitively in this sub-message.
+        if !msg_contains_field_deep(nested_msg, &target_names, fds) {
+            continue;
+        }
+
+        if existing_nested.contains(&field_num) {
+            // Merge deep exclusions into the existing Nested item's sub-projection.
+            for item in &mut items {
+                if let BoundProjectionItem::Nested { field, projection } = item {
+                    if field.field_num == field_num {
+                        merge_deep_exclusions_into(projection, &target_names, nested_msg, fds);
+                        break;
+                    }
+                }
+            }
+        } else {
+            // Create a new Nested item with a Copy sub-projection.
+            let sub_proj = build_deep_exclusion_projection(nested_msg, &target_names, fds);
+            items.push(BoundProjectionItem::Nested {
+                field: BoundField {
+                    field_num,
+                    span: Span { start: 0, end: 0 },
+                },
+                projection: Box::new(sub_proj),
+            });
+        }
+    }
+
+    Ok(BoundProjectionKind::Copy { items, exclusions })
+}
+
+/// Check if a message (or any of its sub-messages) contains a field with
+/// one of the given names.
+fn msg_contains_field_deep(
+    msg: &DescriptorProto,
+    names: &[String],
+    fds: &FileDescriptorSet,
+) -> bool {
+    for fd in &msg.field {
+        if let Some(ref name) = fd.name {
+            if names.iter().any(|n| n == name) {
+                return true;
+            }
+        }
+        if fd.r#type() == ProtoType::Message {
+            let type_name = fd.type_name.as_deref().unwrap_or("");
+            if let Some(nested_msg) = resolve_type_name(fds, type_name) {
+                if msg_contains_field_deep(nested_msg, names, fds) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Build a Copy projection that excludes the target fields and recurses
+/// into sub-messages that transitively contain them.
+fn build_deep_exclusion_projection(
+    msg: &DescriptorProto,
+    target_names: &[String],
+    fds: &FileDescriptorSet,
+) -> BoundProjection {
+    let mut exclusions = Vec::new();
+    let mut items = Vec::new();
+
+    // Exclude target fields at this level.
+    for name in target_names {
+        if let Some(fd) = find_field_by_name(msg, name) {
+            #[allow(clippy::cast_sign_loss)]
+            let num = fd.number.unwrap_or(0) as u32;
+            if !exclusions.contains(&num) {
+                exclusions.push(num);
+            }
+        }
+    }
+
+    // Recurse into sub-message fields that transitively contain targets.
+    for fd in &msg.field {
+        if fd.r#type() != ProtoType::Message {
+            continue;
+        }
+        let type_name = fd.type_name.as_deref().unwrap_or("");
+        let nested_msg = match resolve_type_name(fds, type_name) {
+            Some(m) => m,
+            None => continue,
+        };
+        if !msg_contains_field_deep(nested_msg, target_names, fds) {
+            continue;
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let field_num = fd.number.unwrap_or(0) as u32;
+        let sub_proj = build_deep_exclusion_projection(nested_msg, target_names, fds);
+        items.push(BoundProjectionItem::Nested {
+            field: BoundField {
+                field_num,
+                span: Span { start: 0, end: 0 },
+            },
+            projection: Box::new(sub_proj),
+        });
+    }
+
+    BoundProjection {
+        kind: BoundProjectionKind::Copy { items, exclusions },
+        span: Span { start: 0, end: 0 },
+    }
+}
+
+/// Merge deep exclusions into an existing Nested projection's sub-tree.
+fn merge_deep_exclusions_into(
+    proj: &mut BoundProjection,
+    target_names: &[String],
+    msg: &DescriptorProto,
+    fds: &FileDescriptorSet,
+) {
+    match &mut proj.kind {
+        BoundProjectionKind::Copy {
+            items, exclusions, ..
+        } => {
+            // Add exclusions at this level.
+            for name in target_names {
+                if let Some(fd) = find_field_by_name(msg, name) {
+                    #[allow(clippy::cast_sign_loss)]
+                    let num = fd.number.unwrap_or(0) as u32;
+                    if !exclusions.contains(&num) {
+                        exclusions.push(num);
+                    }
+                }
+            }
+
+            // Collect existing nested field numbers.
+            let existing_nested: std::collections::HashSet<u32> = items
+                .iter()
+                .filter_map(|item| match item {
+                    BoundProjectionItem::Nested { field, .. } => Some(field.field_num),
+                    _ => None,
+                })
+                .collect();
+
+            // Recurse into sub-message fields.
+            let mut new_nested = Vec::new();
+            for fd in &msg.field {
+                if fd.r#type() != ProtoType::Message {
+                    continue;
+                }
+                #[allow(clippy::cast_sign_loss)]
+                let field_num = fd.number.unwrap_or(0) as u32;
+                let type_name = fd.type_name.as_deref().unwrap_or("");
+                let nested_msg = match resolve_type_name(fds, type_name) {
+                    Some(m) => m,
+                    None => continue,
+                };
+                if !msg_contains_field_deep(nested_msg, target_names, fds) {
+                    continue;
+                }
+
+                if existing_nested.contains(&field_num) {
+                    // Merge into existing Nested item.
+                    for item in items.iter_mut() {
+                        if let BoundProjectionItem::Nested { field, projection } = item {
+                            if field.field_num == field_num {
+                                merge_deep_exclusions_into(
+                                    projection,
+                                    target_names,
+                                    nested_msg,
+                                    fds,
+                                );
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    let sub_proj =
+                        build_deep_exclusion_projection(nested_msg, target_names, fds);
+                    new_nested.push(BoundProjectionItem::Nested {
+                        field: BoundField {
+                            field_num,
+                            span: Span { start: 0, end: 0 },
+                        },
+                        projection: Box::new(sub_proj),
+                    });
+                }
+            }
+            items.extend(new_nested);
+        }
+        BoundProjectionKind::Strict { items } => {
+            // For Strict projections, only merge into existing Nested items.
+            for item in items.iter_mut() {
+                if let BoundProjectionItem::Nested { field, projection } = item {
+                    let fd = find_field_by_number(msg, field.field_num);
+                    if let Some(fd) = fd {
+                        if fd.r#type() == ProtoType::Message {
+                            let type_name = fd.type_name.as_deref().unwrap_or("");
+                            if let Some(nested_msg) = resolve_type_name(fds, type_name) {
+                                merge_deep_exclusions_into(
+                                    projection,
+                                    target_names,
+                                    nested_msg,
+                                    fds,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn bind_projection_item_schema(
@@ -1319,5 +1616,152 @@ mod tests {
             },
             other => panic!("expected Predicate, got {other:?}"),
         }
+    }
+
+    // ─── Deep exclusion tests ───
+
+    /// Build a schema where "secret" appears at multiple levels:
+    /// Outer { id: int64=1, secret: string=2, inner: Inner=3, label: string=4 }
+    /// Inner { value: string=1, secret: string=2 }
+    fn deep_excl_schema() -> Vec<u8> {
+        let inner_msg = DescriptorProto {
+            name: Some("Inner".to_string()),
+            field: vec![
+                make_field("value", 1, ProtoType::String, None),
+                make_field("secret", 2, ProtoType::String, None),
+            ],
+            ..Default::default()
+        };
+        let outer_msg = DescriptorProto {
+            name: Some("Outer".to_string()),
+            field: vec![
+                make_field("id", 1, ProtoType::Int64, None),
+                make_field("secret", 2, ProtoType::String, None),
+                make_field("inner", 3, ProtoType::Message, Some(".test.Inner")),
+                make_field("label", 4, ProtoType::String, None),
+            ],
+            ..Default::default()
+        };
+        let fds = FileDescriptorSet {
+            file: vec![FileDescriptorProto {
+                name: Some("test.proto".to_string()),
+                package: Some("test".to_string()),
+                message_type: vec![outer_msg, inner_msg],
+                ..Default::default()
+            }],
+        };
+        prost::Message::encode_to_vec(&fds)
+    }
+
+    fn deep_excl_opts(schema: &[u8]) -> CompileOptions<'_> {
+        CompileOptions {
+            schema: Some(schema),
+            root_message: Some("test.Outer"),
+        }
+    }
+
+    #[test]
+    fn bind_deep_exclusion_expands_at_both_levels() {
+        let schema = deep_excl_schema();
+        let q = parse("{ ..-secret, .. }").unwrap();
+        let bound = bind_with_schema(&q, &deep_excl_opts(&schema)).unwrap();
+        let BoundQuery::Projection(proj) = &bound else {
+            panic!("expected Projection");
+        };
+        let BoundProjectionKind::Copy { exclusions, items } = &proj.kind else {
+            panic!("expected Copy");
+        };
+        // Top-level: secret (field 2) is excluded.
+        assert!(exclusions.contains(&2), "top-level secret should be excluded");
+        // A Nested item for inner (field 3) should be generated.
+        let nested = items
+            .iter()
+            .find_map(|item| match item {
+                BoundProjectionItem::Nested { field, projection } if field.field_num == 3 => {
+                    Some(projection)
+                }
+                _ => None,
+            })
+            .expect("should have Nested item for field 3 (inner)");
+        // The nested projection should exclude secret (field 2) inside Inner.
+        let BoundProjectionKind::Copy {
+            exclusions: inner_excl,
+            ..
+        } = &nested.kind
+        else {
+            panic!("expected Copy for nested projection");
+        };
+        assert!(
+            inner_excl.contains(&2),
+            "inner secret should be excluded"
+        );
+    }
+
+    #[test]
+    fn bind_deep_exclusion_no_match_at_nested_level() {
+        // "id" only exists at top level, not in Inner.
+        let schema = deep_excl_schema();
+        let q = parse("{ ..-id, .. }").unwrap();
+        let bound = bind_with_schema(&q, &deep_excl_opts(&schema)).unwrap();
+        let BoundQuery::Projection(proj) = &bound else {
+            panic!("expected Projection");
+        };
+        let BoundProjectionKind::Copy { exclusions, items } = &proj.kind else {
+            panic!("expected Copy");
+        };
+        // Top-level: id (field 1) is excluded.
+        assert!(exclusions.contains(&1));
+        // No Nested item should be generated since Inner doesn't have "id".
+        assert!(
+            !items.iter().any(|item| matches!(item, BoundProjectionItem::Nested { .. })),
+            "no Nested item needed when field only exists at top level"
+        );
+    }
+
+    #[test]
+    fn bind_deep_exclusion_schema_free_rejected() {
+        let q = parse("{ ..-#2, .. }").unwrap();
+        let err = bind_schema_free(&q).unwrap_err();
+        assert!(matches!(err, CompileError::DeepExclusionWithoutSchema { .. }));
+    }
+
+    #[test]
+    fn bind_deep_exclusion_merges_with_explicit_nested() {
+        // User writes `{ inner { value }, ..-secret, .. }` — the explicit
+        // Nested for inner should get secret excluded too.
+        let schema = deep_excl_schema();
+        let q = parse("{ inner { value, .. }, ..-secret, .. }").unwrap();
+        let bound = bind_with_schema(&q, &deep_excl_opts(&schema)).unwrap();
+        let BoundQuery::Projection(proj) = &bound else {
+            panic!("expected Projection");
+        };
+        let BoundProjectionKind::Copy { exclusions, items } = &proj.kind else {
+            panic!("expected Copy");
+        };
+        // Top-level secret excluded.
+        assert!(exclusions.contains(&2));
+        // The user's explicit Nested for inner should now also have secret excluded.
+        let nested = items
+            .iter()
+            .find_map(|item| match item {
+                BoundProjectionItem::Nested { field, projection } if field.field_num == 3 => {
+                    Some(projection)
+                }
+                _ => None,
+            })
+            .expect("should have Nested item for field 3 (inner)");
+        let BoundProjectionKind::Copy {
+            exclusions: inner_excl,
+            items: inner_items,
+        } = &nested.kind
+        else {
+            panic!("expected Copy for nested projection");
+        };
+        // Inner.secret (field 2) should be excluded.
+        assert!(inner_excl.contains(&2));
+        // Inner.value (field 1) should still be present as an explicit item.
+        assert!(inner_items
+            .iter()
+            .any(|item| matches!(item, BoundProjectionItem::Field(f) if f.field_num == 1)));
     }
 }

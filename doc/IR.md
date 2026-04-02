@@ -160,7 +160,24 @@ DISPATCH  default:COPY               -- preserve unknown address fields
 RETURN
 ```
 
-### 6.3 Predicate only
+### 6.3 Deep exclusion
+
+Source: `{ ..-secret, .. }` with `Outer { id=1, secret=2, inner=3: Inner }` and `Inner { value=1, secret=2 }`.
+
+The compiler expands `..-secret` at bind time by walking the schema tree and generating exclusion arms at each level where `secret` exists:
+
+```
+DISPATCH  default:COPY                -- preserve unknown top-level fields
+  | Field(2)  → SKIP                 -- secret (top-level)
+  | Field(3)  → FRAME(inner_prog)    -- inner sub-message
+
+LABEL(inner_prog)
+DISPATCH  default:COPY               -- preserve unknown inner fields
+  | Field(2)  → SKIP                 -- secret (inside Inner)
+RETURN
+```
+
+### 6.4 Predicate only
 
 Source: `age > 18 && address.city == "NYC"`
 
@@ -180,7 +197,7 @@ RETURN
 -- bool: predicate result; output: empty (no COPY instructions), cursor: 0
 ```
 
-### 6.4 Combined filter + projection, single pass
+### 6.5 Combined filter + projection, single pass
 
 Source: `WHERE age > 18 AND address.city == "NYC"  SELECT { name, address { city }, ... }`
 

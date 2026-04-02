@@ -75,17 +75,28 @@ impl<'a> Parser<'a> {
         }
 
         // Parse comma-separated entries until `}`.
-        // Entries: field, field { }, -field (exclusion).
+        // Entries: field, field { }, -field (exclusion), ..-field (deep exclusion).
         // A bare `..` terminates as Copy mode.
         let mut items = Vec::new();
         let mut exclusions = Vec::new();
+        let mut deep_exclusions = Vec::new();
 
         loop {
             match self.peek_kind()? {
                 TokenKind::DotDot => {
                     self.lexer.next_token()?;
-                    // bare `..` — copy terminator
-                    return Ok(ProjectionKind::Copy { items, exclusions });
+                    if matches!(self.peek_kind()?, TokenKind::Minus) {
+                        // `..-field` — deep exclusion
+                        self.lexer.next_token()?;
+                        deep_exclusions.push(self.parse_field_ref()?);
+                    } else {
+                        // bare `..` — copy terminator
+                        return Ok(ProjectionKind::Copy {
+                            items,
+                            exclusions,
+                            deep_exclusions,
+                        });
+                    }
                 }
                 TokenKind::Minus => {
                     self.lexer.next_token()?;
@@ -118,7 +129,7 @@ impl<'a> Parser<'a> {
         }
 
         // Reached `}` without `..` — Strict mode.
-        if !exclusions.is_empty() {
+        if !exclusions.is_empty() || !deep_exclusions.is_empty() {
             let tok = self.lexer.peek()?;
             return Err(ParseError {
                 kind: ParseErrorKind::Expected {
@@ -629,7 +640,7 @@ mod tests {
 
     fn assert_copy(proj: &Projection, expected_items: &[&str], expected_exclusions: usize) {
         match &proj.kind {
-            ProjectionKind::Copy { items, exclusions } => {
+            ProjectionKind::Copy { items, exclusions, .. } => {
                 let names: Vec<String> = items.iter().map(item_debug).collect();
                 let expected: Vec<String> =
                     expected_items.iter().map(|s| (*s).to_string()).collect();
@@ -710,7 +721,7 @@ mod tests {
     fn proj_copy_exclusion() {
         let proj = parse_proj("{ -payload, -thumbnail, .. }").unwrap();
         match &proj.kind {
-            ProjectionKind::Copy { items, exclusions } => {
+            ProjectionKind::Copy { items, exclusions, .. } => {
                 assert!(items.is_empty());
                 assert_eq!(exclusions.len(), 2);
                 assert!(matches!(&exclusions[0], FieldRef::Name(n, _) if n == "payload"));
@@ -779,13 +790,83 @@ mod tests {
     fn proj_copy_exclusion_by_number() {
         let proj = parse_proj("{ -#7, .. }").unwrap();
         match &proj.kind {
-            ProjectionKind::Copy { items, exclusions } => {
+            ProjectionKind::Copy { items, exclusions, .. } => {
                 assert!(items.is_empty());
                 assert_eq!(exclusions.len(), 1);
                 assert!(matches!(&exclusions[0], FieldRef::Number(7, _)));
             }
             other => panic!("expected Copy, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn proj_deep_exclusion() {
+        let proj = parse_proj("{ ..-secret, .. }").unwrap();
+        match &proj.kind {
+            ProjectionKind::Copy {
+                items,
+                exclusions,
+                deep_exclusions,
+            } => {
+                assert!(items.is_empty());
+                assert!(exclusions.is_empty());
+                assert_eq!(deep_exclusions.len(), 1);
+                assert!(matches!(&deep_exclusions[0], FieldRef::Name(n, _) if n == "secret"));
+            }
+            other => panic!("expected Copy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proj_deep_exclusion_by_number() {
+        let proj = parse_proj("{ ..-#5, .. }").unwrap();
+        match &proj.kind {
+            ProjectionKind::Copy {
+                deep_exclusions, ..
+            } => {
+                assert_eq!(deep_exclusions.len(), 1);
+                assert!(matches!(&deep_exclusions[0], FieldRef::Number(5, _)));
+            }
+            other => panic!("expected Copy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proj_deep_exclusion_mixed() {
+        // Mix shallow and deep exclusions
+        let proj = parse_proj("{ -payload, ..-secret, .. }").unwrap();
+        match &proj.kind {
+            ProjectionKind::Copy {
+                items,
+                exclusions,
+                deep_exclusions,
+            } => {
+                assert!(items.is_empty());
+                assert_eq!(exclusions.len(), 1);
+                assert_eq!(deep_exclusions.len(), 1);
+            }
+            other => panic!("expected Copy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proj_deep_exclusion_multiple() {
+        let proj = parse_proj("{ ..-secret, ..-internal, .. }").unwrap();
+        match &proj.kind {
+            ProjectionKind::Copy {
+                deep_exclusions, ..
+            } => {
+                assert_eq!(deep_exclusions.len(), 2);
+            }
+            other => panic!("expected Copy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proj_err_deep_exclusion_without_copy() {
+        // Deep exclusions require `..` at the end
+        let err = parse_proj("{ ..-secret }").unwrap_err();
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
     }
 
     #[test]
@@ -806,7 +887,7 @@ mod tests {
         // Items come before `..`
         let proj = parse_proj("{ name, .. }").unwrap();
         assert!(matches!(proj.kind, ProjectionKind::Copy { .. }));
-        if let ProjectionKind::Copy { items, exclusions } = &proj.kind {
+        if let ProjectionKind::Copy { items, exclusions, .. } = &proj.kind {
             assert_eq!(items.len(), 1);
             assert!(exclusions.is_empty());
         }

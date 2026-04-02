@@ -32,10 +32,12 @@ pub enum ProjectionKind {
     ///
     /// Copies all unmatched fields. Explicit items are included as usual.
     /// Exclusions (via `-field`) strip specific fields at the current level.
+    /// Deep exclusions (via `..-field`) strip a field at every nesting depth.
     /// `{ .. }` alone is identity copy. `{ .. -secret }` copies all except `secret`.
     Copy {
         items: Vec<ProjectionItem>,
         exclusions: Vec<FieldRef>,
+        deep_exclusions: Vec<FieldRef>,
     },
 }
 
