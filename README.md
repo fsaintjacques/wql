@@ -165,20 +165,44 @@ See [doc/IR.md](doc/IR.md) for the full specification and [doc/ARCHITECTURE.md](
 
 ## C FFI
 
-The `wql-capi` crate produces `libwql` with a stable C ABI:
+The `wql-capi` crate produces `libwql` with a stable C ABI. The workflow is: compile query to bytecode, load bytecode into a program handle, execute against input bytes.
 
 ```c
-WqlStatus wql_compile(const char* source, size_t source_len,
-                       const WqlCompileOptions* options, WqlProgram** out);
-int       wql_filter(const WqlProgram* prog, const uint8_t* input, size_t input_len);
-ptrdiff_t wql_project(const WqlProgram* prog, const uint8_t* input, size_t input_len,
-                       uint8_t* output, size_t output_len);
-ptrdiff_t wql_project_and_filter(const WqlProgram* prog, const uint8_t* input, size_t input_len,
-                                  uint8_t* output, size_t output_len);
-void      wql_program_free(WqlProgram* prog);
+// Compile (schema-free)
+wql_bytes_t wql_compile(const char* query, char** errmsg);
+
+// Compile (with schema)
+wql_bytes_t wql_compile_with_schema(
+    const char* query,
+    const uint8_t* schema, size_t schema_len,
+    const char* root_message,
+    char** errmsg);
+
+// Load bytecode into a reusable program handle
+wql_program_t* wql_program_load(const uint8_t* bytecode, size_t len, char** errmsg);
+
+// Execute
+int32_t wql_filter(const wql_program_t* prog,
+                   const uint8_t* input, size_t input_len,
+                   char** errmsg);               // 1=pass, 0=filtered, -1=error
+
+int64_t wql_project(const wql_program_t* prog,
+                    const uint8_t* input, size_t input_len,
+                    uint8_t* output, size_t output_len,
+                    char** errmsg);               // bytes written, or -1=error
+
+int64_t wql_project_and_filter(const wql_program_t* prog,
+                               const uint8_t* input, size_t input_len,
+                               uint8_t* output, size_t output_len,
+                               char** errmsg);    // bytes written, -1=filtered, -2=error
+
+// Cleanup
+void wql_program_free(wql_program_t* prog);
+void wql_bytes_free(wql_bytes_t bytes);
+void wql_errmsg_free(char* msg);
 ```
 
-Thread-safe: all execution functions take `const WqlProgram*` and can be called concurrently.
+Thread-safe: all execution functions take `const wql_program_t*` and can be called concurrently.
 
 ## License
 
