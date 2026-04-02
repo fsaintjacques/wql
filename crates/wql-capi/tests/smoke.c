@@ -224,6 +224,25 @@ static void test_output_buffer_too_small(void) {
     printf("  PASS test_output_buffer_too_small\n");
 }
 
+static void test_null_result_pointer(void) {
+    char *err = NULL;
+    struct wql_bytes_t bc = wql_compile("#1 > 0", &err);
+    assert(bc.data != NULL);
+
+    struct wql_program_t *prog = wql_program_load(bc.data, bc.len, &err);
+    assert(prog != NULL);
+    wql_bytes_free(bc);
+
+    /* Passing NULL result should return error, not silent success */
+    int rc = wql_eval(prog, INPUT, INPUT_LEN, NULL, 0, NULL, &err);
+    assert(rc == -1 && "expected error for null result");
+    assert(err != NULL);
+
+    wql_errmsg_free(err);
+    wql_program_free(prog);
+    printf("  PASS test_null_result_pointer\n");
+}
+
 int main(void) {
     printf("wql-capi C smoke tests:\n");
     test_compile_and_inspect();
@@ -236,6 +255,7 @@ int main(void) {
     test_null_errmsg();
     test_free_null();
     test_output_buffer_too_small();
+    test_null_result_pointer();
     printf("All C smoke tests passed.\n");
     return 0;
 }

@@ -261,6 +261,11 @@ pub unsafe extern "C" fn wql_eval(
     result: *mut wql_eval_result_t,
     errmsg: *mut *mut std::ffi::c_char,
 ) -> i32 {
+    if result.is_null() {
+        set_errmsg(errmsg, "null result pointer");
+        return -1;
+    }
+
     let ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> Result<wql_runtime::EvalResult, String> {
             let prog = unsafe { &(*program).inner };
@@ -272,11 +277,9 @@ pub unsafe extern "C" fn wql_eval(
 
     match ret {
         Ok(Ok(eval_result)) => {
-            if !result.is_null() {
-                let out = unsafe { &mut *result };
-                out.output_len = eval_result.output_len;
-                out.matched = eval_result.matched;
-            }
+            let out = unsafe { &mut *result };
+            out.output_len = eval_result.output_len;
+            out.matched = eval_result.matched;
             0
         }
         Ok(Err(msg)) => {
