@@ -395,11 +395,10 @@ fn resolve_enum_literal(
         return Ok(None);
     };
     let type_name = field_desc.type_name.as_deref().unwrap_or("");
-    let enum_desc = resolve_enum_type_name(fds, type_name).ok_or_else(|| {
-        CompileError::InvalidMessageType {
+    let enum_desc =
+        resolve_enum_type_name(fds, type_name).ok_or_else(|| CompileError::InvalidMessageType {
             type_name: type_name.to_string(),
-        }
-    })?;
+        })?;
     for v in &enum_desc.value {
         if v.name.as_deref() == Some(name.as_str()) {
             return Ok(Some(Literal::Int(i64::from(v.number.unwrap_or(0)), *span)));
@@ -429,11 +428,10 @@ fn resolve_enum_string_predicate(
         });
     };
     let type_name = field_desc.type_name.as_deref().unwrap_or("");
-    let enum_desc = resolve_enum_type_name(fds, type_name).ok_or_else(|| {
-        CompileError::InvalidMessageType {
+    let enum_desc =
+        resolve_enum_type_name(fds, type_name).ok_or_else(|| CompileError::InvalidMessageType {
             type_name: type_name.to_string(),
-        }
-    })?;
+        })?;
     if matches!(op, StringOp::Matches) {
         return Err(CompileError::UnsupportedComparison {
             op: "matches",
@@ -540,7 +538,7 @@ fn validate_literal_type(
         },
         ProtoType::Enum => match literal {
             Literal::Int(..) | Literal::String(..) => Ok(()),
-            _ => Err(CompileError::TypeError {
+            Literal::Bool(..) => Err(CompileError::TypeError {
                 field: field_name,
                 expected: "integer or string (enum)",
                 actual: literal_type_name(literal),
@@ -758,8 +756,7 @@ fn bind_predicate_schema(
                 values
                     .iter()
                     .map(|v| {
-                        resolve_enum_literal(fd, v, fds)
-                            .map(|opt| opt.unwrap_or_else(|| v.clone()))
+                        resolve_enum_literal(fd, v, fds).map(|opt| opt.unwrap_or_else(|| v.clone()))
                     })
                     .collect::<Result<Vec<_>, _>>()?
             } else {

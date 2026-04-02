@@ -313,9 +313,22 @@ fn filter_status_in_set_by_name() {
 }
 
 #[test]
+fn filter_status_enum_neq_by_name() {
+    assert!(!filter(r#"status != "ACTIVE""#, &opts_person(), &alice()));
+    assert!(filter(r#"status != "ACTIVE""#, &opts_person(), &bob()));
+}
+
+#[test]
 fn filter_status_enum_name_invalid() {
     let opts = opts_person();
     let result = compile(r#"status == "BOGUS""#, &opts);
+    assert!(result.is_err());
+}
+
+#[test]
+fn filter_status_enum_matches_rejected() {
+    let opts = opts_person();
+    let result = compile(r#"status matches "ACT.*""#, &opts);
     assert!(result.is_err());
 }
 
@@ -341,26 +354,14 @@ fn filter_status_enum_ends_with() {
         &opts_person(),
         &alice()
     ));
-    assert!(filter(
-        r#"status ends_with "IVE""#,
-        &opts_person(),
-        &bob()
-    ));
+    assert!(filter(r#"status ends_with "IVE""#, &opts_person(), &bob()));
 }
 
 #[test]
 fn filter_status_enum_contains() {
-    assert!(filter(
-        r#"status contains "ACT""#,
-        &opts_person(),
-        &alice()
-    ));
+    assert!(filter(r#"status contains "ACT""#, &opts_person(), &alice()));
     // INACTIVE also contains "ACT"
-    assert!(filter(
-        r#"status contains "ACT""#,
-        &opts_person(),
-        &bob()
-    ));
+    assert!(filter(r#"status contains "ACT""#, &opts_person(), &bob()));
 }
 
 #[test]

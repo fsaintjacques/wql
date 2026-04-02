@@ -3,6 +3,8 @@
 //! Exposes the WQL compiler and runtime as a C-compatible shared/static library.
 //! All functions use `catch_unwind` for panic safety.
 //!
+// Reserved padding fields are public for C ABI stability.
+#![allow(clippy::pub_underscore_fields)]
 //! Ownership model:
 //! - `wql_compile*` returns a `wql_bytes_t` that the caller must free with `wql_bytes_free`.
 //! - `wql_project*` / `wql_filter` write into caller-provided buffers — no Rust-side allocation.
