@@ -158,40 +158,6 @@ int32_t wql_eval(const struct wql_program_t *program,
                  char **errmsg);
 
 /**
- * Run a filter (predicate-only) program on input bytes.
- *
- * Returns 1 if the record passes, 0 if filtered out, -1 on error.
- */
-int32_t wql_filter(const struct wql_program_t *program,
-                   const uint8_t *input,
-                   uintptr_t input_len,
-                   char **errmsg);
-
-/**
- * Run a projection program. Writes projected output into the caller's buffer.
- *
- * Returns the number of bytes written to `output`, or -1 on error.
- */
-int64_t wql_project(const struct wql_program_t *program,
-                    const uint8_t *input,
-                    uintptr_t input_len,
-                    uint8_t *output,
-                    uintptr_t output_len,
-                    char **errmsg);
-
-/**
- * Run a combined filter+projection program. Writes output into the caller's buffer.
- *
- * Returns `>= 0` bytes written (passed), `-1` filtered, `-2` error.
- */
-int64_t wql_project_and_filter(const struct wql_program_t *program,
-                               const uint8_t *input,
-                               uintptr_t input_len,
-                               uint8_t *output,
-                               uintptr_t output_len,
-                               char **errmsg);
-
-/**
  * Free a `wql_bytes_t` returned by `wql_compile*`.
  *
  * # Safety

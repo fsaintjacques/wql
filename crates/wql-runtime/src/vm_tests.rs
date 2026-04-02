@@ -1,5 +1,5 @@
 use crate::test_utils::*;
-use crate::{filter, project, project_and_filter, LoadedProgram, RuntimeError};
+use crate::{LoadedProgram, RuntimeError};
 use alloc::vec;
 use alloc::vec::Vec;
 use wql_ir::{ArmAction, ArmMatch, DefaultAction, DispatchArm, Encoding, Instruction};
@@ -15,8 +15,8 @@ fn make_program(instrs: &[Instruction]) -> LoadedProgram {
 /// gap-and-shift strategy which needs temporary extra space.
 fn run_project(program: &LoadedProgram, input: &[u8]) -> Result<Vec<u8>, RuntimeError> {
     let mut output = vec![0u8; input.len() + 64];
-    let written = project(program, input, &mut output)?;
-    output.truncate(written);
+    let result = program.eval(input, &mut output)?;
+    output.truncate(result.output_len);
     Ok(output)
 }
 
@@ -383,7 +383,7 @@ fn frame_depth_exceeded() {
     }
 
     let mut output = vec![0u8; msg.len() + 64];
-    let result = project(&program, &msg, &mut output);
+    let result = program.eval(&msg, &mut output);
     assert_eq!(result, Err(RuntimeError::FrameDepthExceeded));
 }
 
@@ -418,7 +418,7 @@ fn make_person(age: u64, name: &[u8], status: u64) -> Vec<u8> {
 }
 
 fn run_filter(program: &LoadedProgram, input: &[u8]) -> bool {
-    filter(program, input).unwrap()
+    program.eval(input, &mut []).unwrap().matched
 }
 
 #[test]
@@ -777,10 +777,11 @@ fn project_and_filter_pass() {
 
     let input = make_person(25, b"Alice", 1);
     let mut output = vec![0u8; input.len() + 64];
-    let result = project_and_filter(&prog, &input, &mut output).unwrap();
+    let result = prog.eval(&input, &mut output).unwrap();
 
     let expected = encode_len_field(2, b"Alice");
-    assert_eq!(result, Some(expected.len()));
+    assert!(result.matched);
+    assert_eq!(result.output_len, expected.len());
     assert_eq!(&output[..expected.len()], expected.as_slice());
 }
 
@@ -804,8 +805,8 @@ fn project_and_filter_fail() {
 
     let input = make_person(10, b"Alice", 1);
     let mut output = vec![0u8; input.len() + 64];
-    let result = project_and_filter(&prog, &input, &mut output).unwrap();
-    assert_eq!(result, None);
+    let result = prog.eval(&input, &mut output).unwrap();
+    assert!(!result.matched);
 }
 
 // ── Integration / edge cases ──
@@ -877,15 +878,16 @@ fn bool_stack_empty() {
 
     let input = encode_varint_field(1, 42);
     let mut output = vec![0u8; input.len() + 64];
-    let result = project_and_filter(&prog, &input, &mut output).unwrap();
-    assert_eq!(result, Some(input.len()));
+    let result = prog.eval(&input, &mut output).unwrap();
+    assert!(result.matched);
+    assert_eq!(result.output_len, input.len());
 }
 
 #[test]
 fn stack_underflow() {
     // AND with empty stack → StackUnderflow.
     let prog = make_program(&[Instruction::And, Instruction::Return]);
-    let result = filter(&prog, &[]);
+    let result = prog.eval(&[], &mut []);
     assert_eq!(result, Err(RuntimeError::StackUnderflow));
 }
 

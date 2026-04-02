@@ -118,35 +118,3 @@ impl LoadedProgram {
         }
     }
 }
-
-/// Project `input` through `program`, writing selected fields to `output`.
-#[deprecated(note = "use LoadedProgram::eval() instead")]
-pub fn project(
-    program: &LoadedProgram,
-    input: &[u8],
-    output: &mut [u8],
-) -> Result<usize, RuntimeError> {
-    program.eval(input, output).map(|r| r.output_len)
-}
-
-/// Run a filter-only `program` against `input`, returning whether it matches.
-#[deprecated(note = "use LoadedProgram::eval() instead")]
-pub fn filter(program: &LoadedProgram, input: &[u8]) -> Result<bool, RuntimeError> {
-    program.eval(input, &mut []).map(|r| r.matched)
-}
-
-/// Project and filter `input` through `program`.
-#[deprecated(note = "use LoadedProgram::eval() instead")]
-pub fn project_and_filter(
-    program: &LoadedProgram,
-    input: &[u8],
-    output: &mut [u8],
-) -> Result<Option<usize>, RuntimeError> {
-    program.eval(input, output).map(|r| {
-        if r.matched {
-            Some(r.output_len)
-        } else {
-            None
-        }
-    })
-}
