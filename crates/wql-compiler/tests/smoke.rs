@@ -132,6 +132,27 @@ fn predicate_parenthesized_precedence() {
 }
 
 #[test]
+fn where_without_select() {
+    let q = parse("WHERE age > 18").unwrap();
+    let Query::Predicate(p) = q else {
+        panic!("expected Predicate");
+    };
+    assert!(matches!(&p.kind, PredicateKind::Comparison { .. }));
+}
+
+#[test]
+fn select_without_where() {
+    let q = parse("SELECT { name, age }").unwrap();
+    let Query::Projection(p) = q else {
+        panic!("expected Projection");
+    };
+    let ProjectionKind::Strict { items } = &p.kind else {
+        panic!("expected Strict");
+    };
+    assert_eq!(items.len(), 2);
+}
+
+#[test]
 fn error_has_span() {
     let err = parse("age >").unwrap_err();
     assert!(err.span.start <= err.span.end);

@@ -68,13 +68,19 @@ Commands:
 
 ## Query Language
 
-A WQL query is one of three forms:
+A WQL query has the form:
 
-| Form | Purpose | Example |
-|---|---|---|
-| Projection only | Select/reshape fields | `{ name, age }` |
-| Predicate only | Filter messages | `age > 18` |
-| Combined | Filter then project | `WHERE age > 18 SELECT { name, age }` |
+```
+[WHERE <predicate>] [SELECT] <projection>
+```
+
+Both clauses are optional (at least one is required). The `WHERE` and `SELECT` keywords are also optional — bare predicates and bare projections are accepted as shorthand:
+
+| Long form | Shorthand |
+|---|---|
+| `SELECT { name, age }` | `{ name, age }` |
+| `WHERE age > 18` | `age > 18` |
+| `WHERE age > 18 SELECT { name, age }` | *(no shorthand)* |
 
 ### Field references
 
@@ -167,16 +173,14 @@ HAS(address.city)
 (status IN [1, 2] || premium == true) && age >= 18
 ```
 
-### Combined form
+### Filter + project
 
-The `WHERE ... SELECT ...` form filters and projects in a single pass:
+When both clauses are present, the predicate is evaluated first. If it fails, no output is produced. If it passes, the projection is applied:
 
 ```
 WHERE age > 18 AND EXISTS(email)
 SELECT { name, email, address { city }, .. -internal }
 ```
-
-If the predicate fails, no output is produced. If it passes, the projection is applied and the result is written to the output.
 
 ### Literals
 

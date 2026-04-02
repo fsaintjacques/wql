@@ -760,6 +760,64 @@ fn filter_zero_varint() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Optional WHERE / SELECT keywords
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn where_keyword_filter_only() {
+    let input = build_message(&[proto_varint(1, 42), proto_len(2, b"Alice")]);
+    // "WHERE <pred>" without SELECT is equivalent to a bare predicate
+    assert!(run_filter("WHERE #1 > 10", &input));
+    assert!(!run_filter("WHERE #1 > 100", &input));
+}
+
+#[test]
+fn select_keyword_project_only() {
+    let input = build_message(&[
+        proto_len(1, b"Alice"),
+        proto_varint(2, 25),
+        proto_varint(3, 99),
+    ]);
+    // "SELECT <proj>" without WHERE is equivalent to a bare projection
+    let output = run_project("SELECT { #1, #2 }", &input);
+    assert!(has_field(&output, 1));
+    assert!(has_field(&output, 2));
+    assert!(!has_field(&output, 3));
+}
+
+#[test]
+fn where_select_combined() {
+    let input = build_message(&[
+        proto_len(1, b"Alice"),
+        proto_varint(2, 25),
+        proto_varint(3, 99),
+    ]);
+    // Full form with both keywords
+    let result = run_project_and_filter("WHERE #2 > 18 SELECT { #1 }", &input);
+    assert!(result.is_some());
+    let output = result.unwrap();
+    assert!(has_field(&output, 1));
+    assert!(!has_field(&output, 2));
+}
+
+#[test]
+fn where_select_equivalence() {
+    // All equivalent filter forms produce the same result
+    let input = build_message(&[proto_varint(1, 42)]);
+    assert_eq!(
+        run_filter("#1 > 10", &input),
+        run_filter("WHERE #1 > 10", &input)
+    );
+
+    // All equivalent projection forms produce the same result
+    let input = build_message(&[proto_varint(1, 42), proto_varint(2, 99)]);
+    assert_eq!(
+        run_project("{ #1 }", &input),
+        run_project("SELECT { #1 }", &input)
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Compile error tests
 // ═══════════════════════════════════════════════════════════════════════
 

@@ -662,7 +662,10 @@ pub fn encode(instructions: &[Instruction]) -> Vec<u8> {
 /// `FLAG_HAS_PREDICATE` based on the query AST.
 #[must_use]
 pub fn encode_with_flags(instructions: &[Instruction], semantic_flags: u16) -> Vec<u8> {
-    encode_program(instructions, compute_regex_flag(instructions) | semantic_flags)
+    encode_program(
+        instructions,
+        compute_regex_flag(instructions) | semantic_flags,
+    )
 }
 
 #[allow(clippy::cast_possible_truncation)] // bytecode << 4 GB

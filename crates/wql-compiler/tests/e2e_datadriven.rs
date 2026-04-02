@@ -294,7 +294,9 @@ fn run_filter(
     expected: &str,
     _line: usize,
 ) -> Result<(), String> {
-    let result = program.eval(input, &mut []).map_err(|e| format!("eval error: {e}"))?;
+    let result = program
+        .eval(input, &mut [])
+        .map_err(|e| format!("eval error: {e}"))?;
     let expected_bool: bool = expected
         .parse()
         .map_err(|_| format!("bad expected: {expected}"))?;

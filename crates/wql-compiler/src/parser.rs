@@ -31,12 +31,21 @@ impl<'a> Parser<'a> {
             TokenKind::Where => {
                 self.lexer.next_token()?; // consume WHERE
                 let predicate = self.parse_predicate()?;
-                self.expect_token(&TokenKind::Select, "'SELECT'")?;
-                let projection = self.parse_projection()?;
-                Query::Combined {
-                    predicate,
-                    projection,
+                if *self.peek_kind()? == TokenKind::Select {
+                    self.lexer.next_token()?; // consume SELECT
+                    let projection = self.parse_projection()?;
+                    Query::Combined {
+                        predicate,
+                        projection,
+                    }
+                } else {
+                    Query::Predicate(predicate)
                 }
+            }
+            TokenKind::Select => {
+                self.lexer.next_token()?; // consume SELECT
+                let proj = self.parse_projection()?;
+                Query::Projection(proj)
             }
             _ => {
                 let predicate = self.parse_predicate()?;
@@ -1265,15 +1274,15 @@ mod tests {
     }
 
     #[test]
-    fn err_missing_select() {
-        let err = parse_query("WHERE age > 18").unwrap_err();
-        assert!(matches!(
-            err.kind,
-            ParseErrorKind::Expected {
-                expected: "'SELECT'",
-                ..
-            }
-        ));
+    fn where_without_select() {
+        let q = parse_query("WHERE age > 18").unwrap();
+        assert!(matches!(q, Query::Predicate(_)));
+    }
+
+    #[test]
+    fn select_without_where() {
+        let q = parse_query("SELECT { name, age }").unwrap();
+        assert!(matches!(q, Query::Projection(_)));
     }
 
     #[test]
