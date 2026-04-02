@@ -616,11 +616,7 @@ fn deep_exclusion_field_only_at_top_level() {
 #[test]
 fn deep_exclusion_combined_with_predicate() {
     let t = team();
-    let result = project_and_filter(
-        "WHERE id > 0 SELECT { ..-secret, .. }",
-        &opts_team(),
-        &t,
-    );
+    let result = project_and_filter("WHERE id > 0 SELECT { ..-secret, .. }", &opts_team(), &t);
     let output = result.expect("predicate should match");
     let decoded = decode_team(&output);
     assert_eq!(decoded.secret, "");

@@ -52,7 +52,6 @@ pub enum ProjectionItem {
         field: FieldRef,
         projection: Box<Projection>,
     },
-
 }
 
 // ──────────────────────────────────── Field references ────

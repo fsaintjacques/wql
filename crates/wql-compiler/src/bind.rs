@@ -668,9 +668,7 @@ fn bind_projection_schema(
                     exclusions: bound_excl,
                 }
             } else {
-                expand_deep_exclusions(
-                    bound_items, bound_excl, deep_exclusions, msg, fds,
-                )?
+                expand_deep_exclusions(bound_items, bound_excl, deep_exclusions, msg, fds)?
             }
         }
     };
@@ -702,12 +700,11 @@ fn expand_deep_exclusions(
             FieldRef::Name(name, _) => Ok(name.clone()),
             FieldRef::Number(n, span) => {
                 // For numbered fields, look up the name in the current message
-                let fd = find_field_by_number(msg, *n).ok_or_else(|| {
-                    CompileError::UnresolvedField {
+                let fd =
+                    find_field_by_number(msg, *n).ok_or_else(|| CompileError::UnresolvedField {
                         field: format!("#{n}"),
                         span: *span,
-                    }
-                })?;
+                    })?;
                 Ok(fd.name.clone().unwrap_or_else(|| format!("#{n}")))
             }
         })
@@ -717,7 +714,7 @@ fn expand_deep_exclusions(
     let msg_type_name = msg.name.as_deref().unwrap_or("");
     for (name, field_ref) in target_names.iter().zip(deep_exclusions.iter()) {
         let mut visited = std::collections::HashSet::new();
-        if !msg_contains_field_deep(msg, &[name.clone()], fds, &mut visited) {
+        if !msg_contains_field_deep(msg, std::slice::from_ref(name), fds, &mut visited) {
             return Err(CompileError::UnresolvedField {
                 field: name.clone(),
                 span: field_ref.span(),
@@ -741,7 +738,7 @@ fn expand_deep_exclusions(
         .iter()
         .filter_map(|item| match item {
             BoundProjectionItem::Nested { field, .. } => Some(field.field_num),
-            _ => None,
+            BoundProjectionItem::Field(_) => None,
         })
         .collect();
 
@@ -755,9 +752,8 @@ fn expand_deep_exclusions(
         let field_num = fd.number.unwrap_or(0) as u32;
 
         let type_name = fd.type_name.as_deref().unwrap_or("");
-        let nested_msg = match resolve_type_name(fds, type_name) {
-            Some(m) => m,
-            None => continue,
+        let Some(nested_msg) = resolve_type_name(fds, type_name) else {
+            continue;
         };
 
         // Check if any deep exclusion target exists transitively in this sub-message.
@@ -872,9 +868,8 @@ fn build_deep_exclusion_projection(
         if visited.contains(short_name) {
             continue; // already visited — break cycle
         }
-        let nested_msg = match resolve_type_name(fds, type_name) {
-            Some(m) => m,
-            None => continue,
+        let Some(nested_msg) = resolve_type_name(fds, type_name) else {
+            continue;
         };
         let mut child_visited = visited.clone();
         child_visited.insert(short_name.to_string());
@@ -884,8 +879,7 @@ fn build_deep_exclusion_projection(
         #[allow(clippy::cast_sign_loss)]
         let field_num = fd.number.unwrap_or(0) as u32;
         visited.insert(short_name.to_string());
-        let sub_proj =
-            build_deep_exclusion_projection(nested_msg, target_names, fds, visited);
+        let sub_proj = build_deep_exclusion_projection(nested_msg, target_names, fds, visited);
         items.push(BoundProjectionItem::Nested {
             field: BoundField {
                 field_num,
@@ -929,7 +923,7 @@ fn merge_deep_exclusions_into(
                 .iter()
                 .filter_map(|item| match item {
                     BoundProjectionItem::Nested { field, .. } => Some(field.field_num),
-                    _ => None,
+                    BoundProjectionItem::Field(_) => None,
                 })
                 .collect();
 
@@ -946,16 +940,10 @@ fn merge_deep_exclusions_into(
                 if visited.contains(short_name) {
                     continue; // break cycle
                 }
-                let nested_msg = match resolve_type_name(fds, type_name) {
-                    Some(m) => m,
-                    None => continue,
+                let Some(nested_msg) = resolve_type_name(fds, type_name) else {
+                    continue;
                 };
-                if !msg_contains_field_deep(
-                    nested_msg,
-                    target_names,
-                    fds,
-                    &mut visited.clone(),
-                ) {
+                if !msg_contains_field_deep(nested_msg, target_names, fds, &mut visited.clone()) {
                     continue;
                 }
 
@@ -998,8 +986,7 @@ fn merge_deep_exclusions_into(
                     if let Some(fd) = fd {
                         if fd.r#type() == ProtoType::Message {
                             let type_name = fd.type_name.as_deref().unwrap_or("");
-                            let short_name =
-                                type_name.strip_prefix('.').unwrap_or(type_name);
+                            let short_name = type_name.strip_prefix('.').unwrap_or(type_name);
                             if visited.contains(short_name) {
                                 continue;
                             }
@@ -1736,7 +1723,10 @@ mod tests {
             panic!("expected Copy");
         };
         // Top-level: secret (field 2) is excluded.
-        assert!(exclusions.contains(&2), "top-level secret should be excluded");
+        assert!(
+            exclusions.contains(&2),
+            "top-level secret should be excluded"
+        );
         // A Nested item for inner (field 3) should be generated.
         let nested = items
             .iter()
@@ -1755,10 +1745,7 @@ mod tests {
         else {
             panic!("expected Copy for nested projection");
         };
-        assert!(
-            inner_excl.contains(&2),
-            "inner secret should be excluded"
-        );
+        assert!(inner_excl.contains(&2), "inner secret should be excluded");
     }
 
     #[test]
@@ -1777,7 +1764,9 @@ mod tests {
         assert!(exclusions.contains(&1));
         // No Nested item should be generated since Inner doesn't have "id".
         assert!(
-            !items.iter().any(|item| matches!(item, BoundProjectionItem::Nested { .. })),
+            !items
+                .iter()
+                .any(|item| matches!(item, BoundProjectionItem::Nested { .. })),
             "no Nested item needed when field only exists at top level"
         );
     }
@@ -1786,7 +1775,10 @@ mod tests {
     fn bind_deep_exclusion_schema_free_rejected() {
         let q = parse("{ ..-#2, .. }").unwrap();
         let err = bind_schema_free(&q).unwrap_err();
-        assert!(matches!(err, CompileError::DeepExclusionWithoutSchema { .. }));
+        assert!(matches!(
+            err,
+            CompileError::DeepExclusionWithoutSchema { .. }
+        ));
     }
 
     #[test]
