@@ -222,12 +222,15 @@ pub unsafe extern "C" fn wql_program_info(
 }
 
 /// Result of `wql_eval`. Zero-initialize before calling.
+///
+/// New fields will be appended into `_reserved`; existing fields are stable.
 #[repr(C)]
 pub struct wql_eval_result_t {
     /// Bytes written to the output buffer (0 when the program has no projection).
     pub output_len: usize,
     /// Whether the record passed the predicate (`true` when no predicate).
     pub matched: bool,
+    pub _reserved: [u8; 7],
 }
 
 // ═══════════════════════════════════════════════════════════════════════

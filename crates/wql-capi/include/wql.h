@@ -51,6 +51,8 @@ typedef struct wql_program_info_t {
 
 /**
  * Result of `wql_eval`. Zero-initialize before calling.
+ *
+ * New fields will be appended into `_reserved`; existing fields are stable.
  */
 typedef struct wql_eval_result_t {
   /**
@@ -61,6 +63,7 @@ typedef struct wql_eval_result_t {
    * Whether the record passed the predicate (`true` when no predicate).
    */
   bool matched;
+  uint8_t _reserved[7];
 } wql_eval_result_t;
 
 /**
