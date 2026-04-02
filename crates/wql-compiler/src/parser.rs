@@ -640,7 +640,9 @@ mod tests {
 
     fn assert_copy(proj: &Projection, expected_items: &[&str], expected_exclusions: usize) {
         match &proj.kind {
-            ProjectionKind::Copy { items, exclusions, .. } => {
+            ProjectionKind::Copy {
+                items, exclusions, ..
+            } => {
                 let names: Vec<String> = items.iter().map(item_debug).collect();
                 let expected: Vec<String> =
                     expected_items.iter().map(|s| (*s).to_string()).collect();
@@ -721,7 +723,9 @@ mod tests {
     fn proj_copy_exclusion() {
         let proj = parse_proj("{ -payload, -thumbnail, .. }").unwrap();
         match &proj.kind {
-            ProjectionKind::Copy { items, exclusions, .. } => {
+            ProjectionKind::Copy {
+                items, exclusions, ..
+            } => {
                 assert!(items.is_empty());
                 assert_eq!(exclusions.len(), 2);
                 assert!(matches!(&exclusions[0], FieldRef::Name(n, _) if n == "payload"));
@@ -790,7 +794,9 @@ mod tests {
     fn proj_copy_exclusion_by_number() {
         let proj = parse_proj("{ -#7, .. }").unwrap();
         match &proj.kind {
-            ProjectionKind::Copy { items, exclusions, .. } => {
+            ProjectionKind::Copy {
+                items, exclusions, ..
+            } => {
                 assert!(items.is_empty());
                 assert_eq!(exclusions.len(), 1);
                 assert!(matches!(&exclusions[0], FieldRef::Number(7, _)));
@@ -887,7 +893,10 @@ mod tests {
         // Items come before `..`
         let proj = parse_proj("{ name, .. }").unwrap();
         assert!(matches!(proj.kind, ProjectionKind::Copy { .. }));
-        if let ProjectionKind::Copy { items, exclusions, .. } = &proj.kind {
+        if let ProjectionKind::Copy {
+            items, exclusions, ..
+        } = &proj.kind
+        {
             assert_eq!(items.len(), 1);
             assert!(exclusions.is_empty());
         }
