@@ -68,13 +68,15 @@ Commands:
 
 ## Query Language
 
-A WQL query has the form:
+A WQL query has one of three forms:
 
 ```
-[WHERE <predicate>] [SELECT] <projection>
+[WHERE] <predicate>
+[SELECT] <projection>
+WHERE <predicate> SELECT <projection>
 ```
 
-Both clauses are optional (at least one is required). The `WHERE` and `SELECT` keywords are also optional — bare predicates and bare projections are accepted as shorthand:
+The `WHERE` and `SELECT` keywords are optional when only a predicate or only a projection is given:
 
 | Long form | Shorthand |
 |---|---|

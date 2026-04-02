@@ -822,6 +822,13 @@ fn where_select_equivalence() {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
+fn compile_error_predicate_then_select() {
+    // A bare predicate followed by SELECT (without WHERE) must be rejected.
+    let result = compile("#1 > 10 SELECT { #2 }", &CompileOptions::default());
+    assert!(result.is_err());
+}
+
+#[test]
 fn compile_error_named_field_without_schema() {
     let result = compile("{ name }", &CompileOptions::default());
     assert!(result.is_err());
