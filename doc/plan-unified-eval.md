@@ -33,11 +33,6 @@ impl LoadedProgram {
     /// `max_frame_depth > 0`).
     pub fn eval(&self, input: &[u8], output: &mut [u8])
         -> Result<EvalResult, RuntimeError>;
-
-    /// Convenience: filter-only shorthand.
-    pub fn matches(&self, input: &[u8]) -> Result<bool, RuntimeError> {
-        self.eval(input, &mut []).map(|r| r.matched)
-    }
 }
 ```
 
@@ -101,9 +96,6 @@ struct, mirroring the Rust `EvalResult`. `errmsg` follows existing convention
 
 - `eval` is a method on `LoadedProgram` — idiomatic Rust, discoverable via
   autocomplete, and avoids the free-function dispatch problem.
-
-- `matches()` is sugar for the common filter-only case so callers don't need
-  to pass `&mut []` and destructure the result.
 
 - The C API groups outputs into `wql_eval_result_t` to keep the parameter list
   manageable (7 params instead of 8) and mirror the Rust struct.
