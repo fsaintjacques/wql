@@ -300,6 +300,51 @@ true
 true
 false
 
+status == "ACTIVE"
+{"status": "ACTIVE"}
+{"status": "INACTIVE"}
+{"status": "UNKNOWN"}
+----
+true
+false
+false
+
+status in ["ACTIVE", "INACTIVE"]
+{"status": "ACTIVE"}
+{"status": "INACTIVE"}
+{"status": "UNKNOWN"}
+----
+true
+true
+false
+
+status starts_with "ACT"
+{"status": "ACTIVE"}
+{"status": "INACTIVE"}
+{"status": "UNKNOWN"}
+----
+true
+false
+false
+
+status ends_with "IVE"
+{"status": "ACTIVE"}
+{"status": "INACTIVE"}
+{"status": "UNKNOWN"}
+----
+true
+true
+false
+
+status contains "ACT"
+{"status": "ACTIVE"}
+{"status": "INACTIVE"}
+{"status": "UNKNOWN"}
+----
+true
+true
+false
+
 exists(address)
 {"name": "Alice", "address": {"city": "NYC"}}
 {"name": "Bob"}

@@ -89,6 +89,13 @@ pub enum CompileError {
     /// `matches` predicate requires the `regex` feature.
     RegexNotEnabled,
 
+    /// Enum value name not found in the enum definition.
+    UnresolvedEnumValue {
+        value: String,
+        enum_name: String,
+        span: Span,
+    },
+
     /// Same field path used with conflicting encodings.
     ConflictingEncoding { field: String },
 }
@@ -145,6 +152,17 @@ impl std::fmt::Display for CompileError {
             }
             Self::RegexNotEnabled => {
                 write!(f, "matches predicate requires the regex feature")
+            }
+            Self::UnresolvedEnumValue {
+                value,
+                enum_name,
+                span,
+            } => {
+                write!(
+                    f,
+                    "unknown enum value '{value}' for enum '{enum_name}' at byte {}..{}",
+                    span.start, span.end
+                )
             }
             Self::ConflictingEncoding { field } => {
                 write!(f, "field '{field}' used with conflicting encodings")

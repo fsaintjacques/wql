@@ -245,8 +245,8 @@ fn infer_encoding_from_literal(lit: &Literal) -> Encoding {
 
 use prost::Message as _;
 use prost_types::{
-    field_descriptor_proto::Type as ProtoType, DescriptorProto, FieldDescriptorProto,
-    FileDescriptorSet,
+    field_descriptor_proto::Type as ProtoType, DescriptorProto, EnumDescriptorProto,
+    FieldDescriptorProto, FileDescriptorSet,
 };
 
 /// Bind a parsed query using a `FileDescriptorSet` schema.
@@ -324,6 +324,137 @@ fn resolve_type_name<'a>(
     // type_name is usually fully-qualified with a leading dot, e.g. ".pkg.Msg"
     let stripped = type_name.strip_prefix('.').unwrap_or(type_name);
     find_message(fds, stripped)
+}
+
+/// Resolve a `FieldDescriptorProto`'s `type_name` to an `EnumDescriptorProto`.
+fn resolve_enum_type_name<'a>(
+    fds: &'a FileDescriptorSet,
+    type_name: &str,
+) -> Option<&'a EnumDescriptorProto> {
+    let target = type_name.strip_prefix('.').unwrap_or(type_name);
+    for file in &fds.file {
+        let pkg = file.package.as_deref().unwrap_or("");
+        // Top-level enums
+        for e in &file.enum_type {
+            let name = e.name.as_deref().unwrap_or("");
+            let fqn = if pkg.is_empty() {
+                name.to_string()
+            } else {
+                format!("{pkg}.{name}")
+            };
+            if fqn == target {
+                return Some(e);
+            }
+        }
+        // Nested enums inside messages
+        for msg in &file.message_type {
+            if let Some(found) = find_enum_recursive(msg, pkg, target) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn find_enum_recursive<'a>(
+    msg: &'a DescriptorProto,
+    parent_prefix: &str,
+    target: &str,
+) -> Option<&'a EnumDescriptorProto> {
+    let msg_name = msg.name.as_deref().unwrap_or("");
+    let prefix = if parent_prefix.is_empty() {
+        msg_name.to_string()
+    } else {
+        format!("{parent_prefix}.{msg_name}")
+    };
+    for e in &msg.enum_type {
+        let name = e.name.as_deref().unwrap_or("");
+        let fqn = format!("{prefix}.{name}");
+        if fqn == target {
+            return Some(e);
+        }
+    }
+    for nested in &msg.nested_type {
+        if let Some(found) = find_enum_recursive(nested, &prefix, target) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// If `literal` is a string and `field_desc` is an enum, resolve the name to its integer value.
+fn resolve_enum_literal(
+    field_desc: &FieldDescriptorProto,
+    literal: &Literal,
+    fds: &FileDescriptorSet,
+) -> Result<Option<Literal>, CompileError> {
+    if field_desc.r#type() != ProtoType::Enum {
+        return Ok(None);
+    }
+    let Literal::String(name, span) = literal else {
+        return Ok(None);
+    };
+    let type_name = field_desc.type_name.as_deref().unwrap_or("");
+    let enum_desc = resolve_enum_type_name(fds, type_name).ok_or_else(|| {
+        CompileError::InvalidMessageType {
+            type_name: type_name.to_string(),
+        }
+    })?;
+    for v in &enum_desc.value {
+        if v.name.as_deref() == Some(name.as_str()) {
+            return Ok(Some(Literal::Int(i64::from(v.number.unwrap_or(0)), *span)));
+        }
+    }
+    Err(CompileError::UnresolvedEnumValue {
+        value: name.clone(),
+        enum_name: enum_desc.name.clone().unwrap_or_default(),
+        span: *span,
+    })
+}
+
+/// Apply a string predicate against enum value names at compile time,
+/// returning the list of matching integer literals.
+fn resolve_enum_string_predicate(
+    field_desc: &FieldDescriptorProto,
+    op: StringOp,
+    pattern: &Literal,
+    fds: &FileDescriptorSet,
+) -> Result<Vec<Literal>, CompileError> {
+    let Literal::String(pat, span) = pattern else {
+        return Err(CompileError::TypeError {
+            field: field_desc.name.as_deref().unwrap_or("?").to_string(),
+            expected: "string",
+            actual: literal_type_name(pattern),
+            span: pattern.span(),
+        });
+    };
+    let type_name = field_desc.type_name.as_deref().unwrap_or("");
+    let enum_desc = resolve_enum_type_name(fds, type_name).ok_or_else(|| {
+        CompileError::InvalidMessageType {
+            type_name: type_name.to_string(),
+        }
+    })?;
+    if matches!(op, StringOp::Matches) {
+        return Err(CompileError::UnsupportedComparison {
+            op: "matches",
+            literal_type: "enum",
+        });
+    }
+    let matches: Vec<Literal> = enum_desc
+        .value
+        .iter()
+        .filter(|v| {
+            let name = v.name.as_deref().unwrap_or("");
+            match op {
+                StringOp::StartsWith => name.starts_with(pat.as_str()),
+                StringOp::EndsWith => name.ends_with(pat.as_str()),
+                StringOp::Contains => name.contains(pat.as_str()),
+                StringOp::Matches => unreachable!(),
+            }
+        })
+        .map(|v| Literal::Int(i64::from(v.number.unwrap_or(0)), *span))
+        .collect();
+    Ok(matches)
 }
 
 fn find_field_by_name<'a>(
@@ -408,10 +539,10 @@ fn validate_literal_type(
             }),
         },
         ProtoType::Enum => match literal {
-            Literal::Int(..) => Ok(()),
+            Literal::Int(..) | Literal::String(..) => Ok(()),
             _ => Err(CompileError::TypeError {
                 field: field_name,
-                expected: "integer (enum ordinal)",
+                expected: "integer or string (enum)",
                 actual: literal_type_name(literal),
                 span,
             }),
@@ -603,10 +734,15 @@ fn bind_predicate_schema(
         }
         PredicateKind::Comparison { field, op, value } => {
             let bound_path = bind_field_path_schema(field, msg, fds, Some(value))?;
+            let resolved = if let Some(fd) = get_leaf_field_descriptor(field, msg, fds)? {
+                resolve_enum_literal(fd, value, fds)?.unwrap_or_else(|| value.clone())
+            } else {
+                value.clone()
+            };
             BoundPredicateKind::Comparison {
                 field: bound_path,
                 op: *op,
-                value: value.clone(),
+                value: resolved,
             }
         }
         PredicateKind::Presence(field) => {
@@ -615,23 +751,50 @@ fn bind_predicate_schema(
         }
         PredicateKind::InSet { field, values } => {
             let bound_path = bind_field_path_schema(field, msg, fds, values.first())?;
-            // Validate all values in the set
-            if let Some(fd) = get_leaf_field_descriptor(field, msg, fds)? {
+            let resolved = if let Some(fd) = get_leaf_field_descriptor(field, msg, fds)? {
                 for v in values {
                     validate_literal_type(fd, v, v.span())?;
                 }
-            }
+                values
+                    .iter()
+                    .map(|v| {
+                        resolve_enum_literal(fd, v, fds)
+                            .map(|opt| opt.unwrap_or_else(|| v.clone()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                values.clone()
+            };
             BoundPredicateKind::InSet {
                 field: bound_path,
-                values: values.clone(),
+                values: resolved,
             }
         }
         PredicateKind::StringPredicate { field, op, value } => {
-            let bound_path = bind_field_path_schema(field, msg, fds, Some(value))?;
-            BoundPredicateKind::StringPredicate {
-                field: bound_path,
-                op: *op,
-                value: value.clone(),
+            if let Some(fd) = get_leaf_field_descriptor(field, msg, fds)? {
+                if fd.r#type() == ProtoType::Enum {
+                    // Expand string predicate on enum to InSet at compile time
+                    let matching = resolve_enum_string_predicate(fd, *op, value, fds)?;
+                    let bound_path = bind_field_path_schema(field, msg, fds, matching.first())?;
+                    BoundPredicateKind::InSet {
+                        field: bound_path,
+                        values: matching,
+                    }
+                } else {
+                    let bound_path = bind_field_path_schema(field, msg, fds, Some(value))?;
+                    BoundPredicateKind::StringPredicate {
+                        field: bound_path,
+                        op: *op,
+                        value: value.clone(),
+                    }
+                }
+            } else {
+                let bound_path = bind_field_path_schema(field, msg, fds, Some(value))?;
+                BoundPredicateKind::StringPredicate {
+                    field: bound_path,
+                    op: *op,
+                    value: value.clone(),
+                }
             }
         }
     };

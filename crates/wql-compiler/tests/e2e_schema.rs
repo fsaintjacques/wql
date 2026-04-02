@@ -291,6 +291,89 @@ fn filter_status_in_set() {
 }
 
 #[test]
+fn filter_status_enum_by_name() {
+    // String enum names are resolved to their integer values
+    assert!(filter(r#"status == "ACTIVE""#, &opts_person(), &alice()));
+    assert!(!filter(r#"status == "ACTIVE""#, &opts_person(), &bob()));
+    assert!(filter(r#"status == "INACTIVE""#, &opts_person(), &bob()));
+}
+
+#[test]
+fn filter_status_in_set_by_name() {
+    assert!(filter(
+        r#"status in ["ACTIVE", "INACTIVE"]"#,
+        &opts_person(),
+        &alice()
+    ));
+    assert!(!filter(
+        r#"status in ["UNKNOWN"]"#,
+        &opts_person(),
+        &alice()
+    ));
+}
+
+#[test]
+fn filter_status_enum_name_invalid() {
+    let opts = opts_person();
+    let result = compile(r#"status == "BOGUS""#, &opts);
+    assert!(result.is_err());
+}
+
+#[test]
+fn filter_status_enum_starts_with() {
+    assert!(filter(
+        r#"status starts_with "ACT""#,
+        &opts_person(),
+        &alice()
+    ));
+    assert!(!filter(
+        r#"status starts_with "ACT""#,
+        &opts_person(),
+        &bob()
+    ));
+}
+
+#[test]
+fn filter_status_enum_ends_with() {
+    // Both ACTIVE and INACTIVE end with "IVE"
+    assert!(filter(
+        r#"status ends_with "IVE""#,
+        &opts_person(),
+        &alice()
+    ));
+    assert!(filter(
+        r#"status ends_with "IVE""#,
+        &opts_person(),
+        &bob()
+    ));
+}
+
+#[test]
+fn filter_status_enum_contains() {
+    assert!(filter(
+        r#"status contains "ACT""#,
+        &opts_person(),
+        &alice()
+    ));
+    // INACTIVE also contains "ACT"
+    assert!(filter(
+        r#"status contains "ACT""#,
+        &opts_person(),
+        &bob()
+    ));
+}
+
+#[test]
+fn filter_status_enum_no_match() {
+    // No enum value starts with "ZZZ" — expands to empty IN set, always false
+    assert!(!filter(
+        r#"status starts_with "ZZZ""#,
+        &opts_person(),
+        &alice()
+    ));
+}
+
+#[test]
 fn filter_nested_city() {
     assert!(filter(
         r#"address.city == "New York""#,
