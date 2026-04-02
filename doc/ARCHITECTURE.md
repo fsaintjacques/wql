@@ -105,19 +105,26 @@ wql-ir  (no_std + alloc)
 **Public API:**
 
 ```rust
-fn filter(program: &LoadedProgram, input: &[u8]) -> Result<bool, RuntimeError>;
-fn project(program: &LoadedProgram, input: &[u8], output: &mut [u8]) -> Result<usize, RuntimeError>;
-fn project_and_filter(program: &LoadedProgram, input: &[u8], output: &mut [u8]) -> Result<Option<usize>, RuntimeError>;
+pub struct EvalResult {
+    pub output_len: usize,  // bytes written (0 when no projection)
+    pub matched: bool,       // predicate result (true when no predicate)
+}
+
+impl LoadedProgram {
+    pub fn eval(&self, input: &[u8], output: &mut [u8]) -> Result<EvalResult, RuntimeError>;
+}
 ```
 
-All three delegate to a single internal function:
+A single entry point replaces the former `filter`/`project`/`project_and_filter` functions. The program header determines what happens — callers don't dispatch manually. Filter-only callers pass `&mut []`; the `depth == 0` path runs with zero allocation. Programs with `max_frame_depth > 0` and an undersized buffer allocate scratch internally (projected output is discarded).
+
+Internally, `eval` delegates to:
 
 ```rust
 fn execute(&mut self, pc: usize, input: &[u8], output: &mut [u8], out_cursor: usize)
     -> Result<(bool, usize), RuntimeError>
 ```
 
-The output buffer is written during the scan unconditionally. If the bool result is false, the buffer contents are undefined; the caller must not read them.
+The output buffer is written during the scan unconditionally. If `matched` is false, the buffer contents are undefined; the caller must not read them.
 
 **Internal types:**
 
@@ -211,105 +218,66 @@ bytecode: Vec<u8>
 
 ### 4.4 `wql-capi` — C FFI Layer
 
-`std` required (global allocator, `catch_unwind`). Produces a `cdylib`: `libwql.so` / `libwql.dylib` / `wql.dll`.
+`std` required (global allocator, `catch_unwind`). Produces a `cdylib`/`staticlib`: `libwql_capi.so` / `libwql_capi.dylib` / `libwql_capi.a`.
 
 **Ownership model:**
 
-The core challenge is that `Program<'a>` borrows bytes, but the C caller has no concept of lifetimes. The solution is `OwnedProgram`:
-
-```rust
-struct OwnedProgram {
-    bytes: Arc<[u8]>,           // owns the bytecode
-    // re-derived per call via Program::decode(&self.bytes)
-    // decode is O(1): it only validates the header
-}
-```
-
-`OwnedProgram` is heap-allocated and passed to C as an opaque `*mut OwnedProgram` (cast to `*mut WqlProgram` in the header). `Box::into_raw` transfers ownership to the caller; `Box::from_raw` in `wql_program_free` reclaims it.
-
-A fresh `Program<'_>` is derived from `OwnedProgram::bytes` on each call to the execution functions. This is a header validation + slice construction: effectively free.
+`wql_program_t` is an opaque struct wrapping `wql_runtime::LoadedProgram`. It is heap-allocated via `Box::into_raw` and returned to C as an opaque pointer. `Box::from_raw` in `wql_program_free` reclaims it.
 
 **C API:**
 
 ```c
-typedef struct WqlProgram WqlProgram;
+typedef struct wql_program_t wql_program_t;
 
-typedef enum {
-    WQL_OK                        =  0,
-    WQL_ERR_COMPILE               =  1,
-    WQL_ERR_INVALID_PROGRAM       =  2,
-    WQL_ERR_BUFFER_TOO_SMALL      =  3,
-    WQL_ERR_UNSUPPORTED           =  4,
-    WQL_ERR_UNSUPPORTED_VERSION   =  5,
-    WQL_ERR_PANIC                 = 99,
-} WqlStatus;
+// Owned byte buffer returned by wql_compile*. Caller frees with wql_bytes_free.
+typedef struct { uint8_t *data; size_t len; } wql_bytes_t;
 
-// Options for wql_compile. Zero-initialize for all defaults (schema-free,
-// current bytecode version). New fields will always be appended and have
-// a sane zero value, so existing callers remain valid across upgrades.
+// Result of wql_eval. Zero-initialize before calling.
 typedef struct {
-    // Serialized FileDescriptorSet (full transitive closure).
-    // NULL / 0 = schema-free mode; field references must use #N syntax.
-    const uint8_t* schema;
-    size_t         schema_len;
+    uintptr_t output_len;   // bytes written (0 when no projection)
+    bool      matched;      // predicate result (true when no predicate)
+    uint8_t   _reserved[7];
+} wql_eval_result_t;
 
-    // Fully-qualified root message type, e.g. "acme.events.OrderPlaced".
-    // Required when schema is non-NULL; ignored otherwise.
-    const char*    root_message;
+// Compile (schema-free). Returns bytecode; data is NULL on error.
+wql_bytes_t wql_compile(const char *query, char **errmsg);
 
-    // Target bytecode format version for compatibility with older runtimes.
-    // 0 = current (latest) version.
-    uint16_t       target_version;
+// Compile (with schema).
+wql_bytes_t wql_compile_with_schema(
+    const char *query,
+    const uint8_t *schema, size_t schema_len,
+    const char *root_message,
+    char **errmsg);
 
-    // Reserved. Must be zero.
-    uint8_t        _reserved[6];
-} WqlCompileOptions;
+// Load bytecode into a reusable program handle.
+wql_program_t *wql_program_load(const uint8_t *bytecode, size_t len, char **errmsg);
+void wql_program_free(wql_program_t *prog);
 
-// Compile WQL source to a program handle.
-// options may be NULL, which is equivalent to a zero-initialized WqlCompileOptions.
-// On WQL_OK, *out is set to a non-null handle the caller must free with wql_program_free.
-WqlStatus wql_compile(
-    const char* source, size_t source_len,
-    const WqlCompileOptions* options,
-    WqlProgram** out);
+// Query program metadata.
+void wql_program_info(const wql_program_t *prog, wql_program_info_t *out);
 
-// Load a pre-compiled bytecode blob into a program handle.
-WqlStatus wql_program_load(
-    const uint8_t* bytecode, size_t bytecode_len,
-    WqlProgram** out);
+// Evaluate — single entry point for filter, project, or both.
+// Returns 0 on success, -1 on error. result must be non-NULL.
+// For filter-only, pass output=NULL / output_len=0.
+int32_t wql_eval(
+    const wql_program_t *prog,
+    const uint8_t *input, size_t input_len,
+    uint8_t *output, size_t output_len,
+    wql_eval_result_t *result,
+    char **errmsg);
 
-// Free a program handle. Safe to call with NULL.
-void wql_program_free(WqlProgram* prog);
-
-// Returns the WQL runtime version string (static, no free needed).
-const char* wql_version(void);
-
-// Returns 1 if the predicate matches, 0 if not, -1 on error.
-int wql_filter(
-    const WqlProgram* prog,
-    const uint8_t* input, size_t input_len);
-
-// Returns bytes written to output on success, -1 on error.
-// output must be at least input_len bytes.
-ptrdiff_t wql_project(
-    const WqlProgram* prog,
-    const uint8_t* input, size_t input_len,
-    uint8_t* output, size_t output_len);
-
-// Returns bytes written if predicate matched, -1 if predicate was false, -2 on error.
-// output must be at least input_len bytes.
-// If -1 is returned, output contents are undefined and must not be read.
-ptrdiff_t wql_project_and_filter(
-    const WqlProgram* prog,
-    const uint8_t* input, size_t input_len,
-    uint8_t* output, size_t output_len);
+// Cleanup
+void wql_bytes_free(wql_bytes_t bytes);
+void wql_errmsg_free(char *msg);
 ```
 
-`wql.h` is generated by `cbindgen` as part of the `wql-capi` build script and checked into `bindings/include/wql.h`.
+**Error model:** functions that can fail accept an optional `char **errmsg` out parameter. On error, `*errmsg` is set to a heap-allocated string the caller must free with `wql_errmsg_free`. Passing `NULL` for `errmsg` is safe (error message is discarded).
 
-**Thread safety:** `WqlProgram` is immutable after construction. All execution functions take `const WqlProgram*` and are safe to call concurrently from multiple threads with the same handle.
+**Thread safety:** `wql_program_t` is immutable after construction. `wql_eval` takes `const wql_program_t*` and can be called concurrently from multiple threads with the same handle.
 
-**Panic safety:** all public functions are wrapped in `std::panic::catch_unwind`. A caught panic returns `WQL_ERR_PANIC` / `-2`.
+**Panic safety:** all public functions are wrapped in `std::panic::catch_unwind`. A caught panic returns an error code and sets `*errmsg` to `"internal panic during ..."`.
+
+The header file is maintained manually at `crates/wql-capi/include/wql.h`.
 
 **Feature flags:**
 - `regex` (default: on) — passed through to `wql-runtime` and `wql-compiler`.
@@ -357,17 +325,13 @@ WASM linear memory is single-threaded per module instance; the broker calls one 
 
 ```rust
 #[no_mangle]
-pub extern "C" fn wql_filter(input_ptr: i32, input_len: i32) -> i32;
-
-#[no_mangle]
-pub extern "C" fn wql_project(input_ptr: i32, input_len: i32, output_ptr: i32) -> i32;
-
-#[no_mangle]
-pub extern "C" fn wql_project_and_filter(
-    input_ptr: i32, input_len: i32, output_ptr: i32) -> i32;
+pub extern "C" fn wql_eval(
+    input_ptr: i32, input_len: i32,
+    output_ptr: i32, output_len: i32,
+    result_ptr: i32) -> i32;  // 0=ok, -1=error
 ```
 
-Input and output are pointers into WASM linear memory. The broker writes input bytes into memory before calling, and reads output bytes from memory after. Return value: bytes written for project/project_and_filter (−1 if predicate false), 1/0 for filter.
+Input and output are pointers into WASM linear memory. The broker writes input bytes into memory before calling, and reads the result struct (output_len + matched) from memory after. A single exported function handles filter, project, or both.
 
 **Feature flags:** `regex` is off by default to meet the <100 KB WASM binary size target.
 
@@ -391,12 +355,12 @@ strip = true
 ### 5.1 Compile path (Rust)
 
 ```
-compile(source, schema) → Vec<u8>   (wql-compiler)
-Program::decode(&bytes)  → Program  (wql-ir)
-execute(&program, input, output)     (wql-runtime)
+compile(source, schema) → Vec<u8>           (wql-compiler)
+LoadedProgram::from_bytes(&bytes)           (wql-runtime)
+program.eval(input, &mut output) → EvalResult  (wql-runtime)
 ```
 
-The caller owns the `Vec<u8>` (or a `Box<[u8]>`, or a `&'static [u8]` for a compile-time embedded program). `Program` borrows it for the duration of use.
+The caller owns the `Vec<u8>` (or a `Box<[u8]>`, or a `&'static [u8]` for a compile-time embedded program). `LoadedProgram` decodes and owns the instructions for the duration of use.
 
 ### 5.2 Serialized bytecode path
 
@@ -406,13 +370,12 @@ The same `Vec<u8>` can be written to disk, stored in a database, or distributed 
 
 ```
 wql.Compile(source, schema)
-  → cgo → wql_compile → OwnedProgram on heap → *WqlProgram returned
+  → cgo → wql_compile → wql_program_load → *wql_program_t on heap
   Go: *Program struct with runtime.SetFinalizer(p, (*Program).free)
 
-program.ProjectAndFilter(input, output)
-  → cgo → wql_project_and_filter(ptr, input, output)
-  → OwnedProgram.execute() → (bool, usize)
-  → return ptrdiff_t to Go
+program.Eval(input, output)
+  → cgo → wql_eval(prog, input, len, output, len, &result, &err)
+  → result.matched, result.output_len returned to Go
 ```
 
 ### 5.4 JVM via JNI
@@ -434,11 +397,11 @@ Deploy:
 
 Per message (inside broker WASM sandbox):
   broker writes input bytes into WASM linear memory
-  broker calls wql_project_and_filter(input_ptr, input_len, output_ptr)
+  broker calls wql_eval(input_ptr, input_len, output_ptr, output_len, result_ptr)
     → PROGRAM.get_or_init(decode BYTECODE)
-    → execute(&program, input_slice, output_slice) → (bool, n)
-    → return n or -1
-  broker reads output[..n] or discards message
+    → program.eval(input_slice, output_slice) → EvalResult
+    → write result to result_ptr, return 0
+  broker reads result.matched and output[..result.output_len]
 ```
 
 ---
@@ -454,20 +417,21 @@ bindings/go/
 **Go API:**
 
 ```go
-type Program struct { ptr *C.WqlProgram }
+type Program struct { ptr *C.wql_program_t }
+
+type EvalResult struct {
+    OutputLen int
+    Matched   bool
+}
 
 type CompileOptions struct {
-    Schema        []byte // serialized FileDescriptorSet; nil = schema-free
-    RootMessage   string // fully-qualified message name; required when Schema is set
-    TargetVersion uint16 // 0 = current version
+    Schema      []byte // serialized FileDescriptorSet; nil = schema-free
+    RootMessage string // fully-qualified message name; required when Schema is set
 }
 
 func Compile(source string, opts *CompileOptions) (*Program, error)
 func LoadBytecode(bytecode []byte) (*Program, error)
-func (*Program) Filter(input []byte) (bool, error)
-func (*Program) Project(input, output []byte) (int, error)
-func (*Program) ProjectAndFilter(input, output []byte) (int, error)
-// -1 return = predicate false; ≥0 = bytes written
+func (*Program) Eval(input, output []byte) (EvalResult, error)
 func (*Program) Close()
 ```
 
@@ -492,17 +456,18 @@ JNI glue is written in Rust using the `jni` crate, living in a `wql-jni` crate (
 public class CompileOptions {
     public byte[] schema;        // serialized FileDescriptorSet; null = schema-free
     public String rootMessage;   // required when schema is non-null
-    public int    targetVersion; // 0 = current version
+}
+
+public class EvalResult {
+    public int     outputLen;    // bytes written (0 when no projection)
+    public boolean matched;      // predicate result (true when no predicate)
 }
 
 public class WqlProgram implements AutoCloseable {
     public static WqlProgram compile(String source, CompileOptions opts) throws WqlException;
     public static WqlProgram loadBytecode(byte[] bytecode) throws WqlException;
 
-    public boolean filter(byte[] input) throws WqlException;
-    public int project(byte[] input, ByteBuffer output) throws WqlException;
-    // returns -1 if predicate false, otherwise bytes written
-    public int projectAndFilter(byte[] input, ByteBuffer output) throws WqlException;
+    public EvalResult eval(byte[] input, ByteBuffer output) throws WqlException;
 
     @Override public void close();
 }
