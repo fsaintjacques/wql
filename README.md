@@ -68,33 +68,123 @@ Commands:
 
 ## Query Language
 
-### Projections
+A WQL query is one of three forms:
+
+| Form | Purpose | Example |
+|---|---|---|
+| Projection only | Select/reshape fields | `{ name, age }` |
+| Predicate only | Filter messages | `age > 18` |
+| Combined | Filter then project | `WHERE age > 18 SELECT { name, age }` |
+
+### Field references
+
+With a schema (`-s schema.bin -m pkg.Person`), fields are referenced by name:
 
 ```
-{ name, age }                    # strict: keep only these fields
-{ name, address { city }, .. }   # copy mode: keep all, reshape address
-{ .. -payload -thumbnail }       # copy mode: drop specific fields
-{ ..name }                       # deep search: find 'name' at any depth
+name
+address.city
+```
+
+Without a schema, fields are referenced by protobuf field number:
+
+```
+#1
+#3.#1
+```
+
+Named and numbered references can be mixed: `address.#2`, `#3.city`.
+
+### Projections
+
+A projection selects which fields to keep in the output, wrapped in braces.
+
+**Strict mode** — only listed fields survive:
+
+```
+{ name, age }
+{ name, address { city, zip } }
+```
+
+**Copy mode** (`..`) — keep everything, then refine:
+
+```
+{ name, address { city }, .. }     -- keep all, but reshape address
+{ .. -payload, -thumbnail }        -- keep all except these fields
+```
+
+**Deep search** (`..field`) — find a field at any nesting depth:
+
+```
+{ ..name }
 ```
 
 ### Predicates
 
+A predicate is a boolean expression over field values.
+
+**Comparison** — integer and string fields:
+
 ```
 age > 18
 name == "Alice"
-status IN (1, 2, 3)
-address.city == "NYC" && age >= 21
-name STARTS_WITH "A"
+address.city != "NYC"
+```
+
+**Logical operators** — combine with `&&` / `||` / `!` (or `AND` / `OR` / `NOT`):
+
+```
+age >= 21 && address.city == "NYC"
+status == 1 || status == 2
 !active
 ```
 
-**Operators:** `==`, `!=`, `<`, `<=`, `>`, `>=`, `IN`, `STARTS_WITH`, `ENDS_WITH`, `CONTAINS`, `MATCHES` (regex), `&&`, `||`, `!`
-
-### Combined
+**Set membership** — test against a list of values:
 
 ```
-WHERE age > 18 SELECT { name, address { city } }
+status IN [1, 2, 3]
+region IN ["US", "EU", "APAC"]
 ```
+
+**String matching** — case-sensitive:
+
+```
+name STARTS_WITH "A"
+email ENDS_WITH "@example.com"
+description CONTAINS "urgent"
+id MATCHES "^[A-Z]{3}[0-9]+$"
+```
+
+**Field presence** — distinguish missing from zero-value:
+
+```
+EXISTS(email)
+HAS(address.city)
+```
+
+**Parentheses** for grouping:
+
+```
+(status IN [1, 2] || premium == true) && age >= 18
+```
+
+### Combined form
+
+The `WHERE ... SELECT ...` form filters and projects in a single pass:
+
+```
+WHERE age > 18 AND EXISTS(email)
+SELECT { name, email, address { city }, .. -internal }
+```
+
+If the predicate fails, no output is produced. If it passes, the projection is applied and the result is written to the output.
+
+### Literals
+
+| Type | Examples |
+|---|---|
+| Integer | `0`, `42`, `-10` |
+| String | `"hello"`, `"line\nbreak"`, `"\x41"` |
+| Boolean | `true`, `false` |
 
 ## Library API
 
