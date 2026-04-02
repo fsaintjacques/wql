@@ -22,7 +22,7 @@ The IR is intentionally small: 19 instructions. It is designed to express exactl
 
 - **Single-pass.** A WVM program makes exactly one forward scan over the input byte sequence. There are no seek, rewind, or random-access instructions.
 - **Zero-copy for pure projections.** When a field is copied verbatim, the tag and value bytes are `memcpy`'d to the output buffer. No decoding occurs.
-- **Composable default actions.** The `DISPATCH` instruction carries a default action (`SKIP`, `COPY`, or `RECURSE`) that determines what happens to any field not explicitly matched. This single knob controls strict projection and unknown-field preservation.
+- **Composable default actions.** The `DISPATCH` instruction carries a default action (`SKIP` or `COPY`) that determines what happens to any field not explicitly matched. This single knob controls strict projection and unknown-field preservation.
 - **Unified IR.** Predicates and projections share the same instruction set and the same execution model. Every program produces both a bool result and an output byte count. The caller decides which to use.
 - **Always write, caller decides.** The output buffer is written during the scan unconditionally. If the bool result is false, the buffer contents are undefined and the caller must not read them. This avoids any rollback or conditional write path.
 - **Explicit nesting.** Sub-message scope is entered and exited explicitly via `FRAME`. Length prefixes are recomputed automatically on `FRAME` exit. Nesting can be arbitrarily deep.
@@ -74,7 +74,7 @@ The output buffer for `project_and_filter` is written during the scan regardless
 `DISPATCH` is the only looping instruction. It iterates over every `(field_num, wire_type)` pair in the current scan window and routes each to the first matching action. At end-of-window it halts.
 
 ```
-DISPATCH  default: SKIP | COPY | RECURSE(label)
+DISPATCH  default: SKIP | COPY
   | Field(n)                → action+
   | Field(m), WireType(LEN) → action+   -- wire type guard (optional)
   ...
@@ -88,14 +88,13 @@ The **default action** applies to every field that matches no explicit arm:
 |---|---|
 | `SKIP` | Consume value bytes, emit nothing. Strict projection — unknown fields are dropped. |
 | `COPY` | Emit tag + raw value bytes verbatim to output buffer. Unknown fields are preserved. Safe for schema evolution. |
-| `RECURSE(P)` | If `wire_type == LEN`: push new scan window, run program P inside it, emit tag + reframed length + sub-output. If `wire_type != LEN`: `SKIP`. |
 
 ### 5.2 Sub-message scope — `FRAME`
 
 | Instruction | Operands | Description |
 |---|---|---|
 | `FRAME(prog)` | program reference | Current field must have wire type `LEN`. Read length prefix N. Push a new scan window of N bytes and a fresh output buffer. Run `prog` inside the new scope. On exit: prepend new length varint to sub-output; append `tag + length + sub-output` to parent output buffer. Pop scan window. |
-| `LABEL(name)` | name string | Declares a named program entry point. Required target for `RECURSE(P)`. Programs are referenced by label, not by bytecode offset, to support self-referential programs. |
+| `LABEL(name)` | name string | Declares a named program entry point. Required target for `FRAME`. Programs are referenced by label, not by bytecode offset. |
 
 ### 5.3 Predicate evaluation
 
@@ -231,8 +230,7 @@ RETURN
 | **I-02 Valid output** | The output buffer produced by any projection program is a valid proto3 wire encoding. Length prefixes are exact (recomputed on `FRAME` exit). |
 | **I-03 Unknown safety** | With `default:COPY` at every `DISPATCH` level, a program compiled against schema version N produces correct output for messages written by any schema version N+k (k ≥ 0). |
 | **I-04 Register scope** | Registers loaded inside a `FRAME` scope remain valid after the `FRAME` exits (they are in the flat register file). |
-| **I-05 RECURSE termination** | `RECURSE(P)` terminates because each recursive invocation consumes a strictly bounded sub-slice of bytes (the `LEN` field's declared length). Proto wire format forbids cycles. |
-| **I-06 Code size** | A `RECURSE(P)` back-reference is a constant-size pointer. Deep projection programs do not grow in code size with nesting depth. |
+| **I-05 FRAME termination** | `FRAME` terminates because each invocation consumes a strictly bounded sub-slice of bytes (the `LEN` field's declared length). Proto wire format forbids cycles. |
 | **I-07 Output cursor** | The output cursor is monotonically non-decreasing. It equals the number of bytes appended to the output buffer. For pure filter programs, the cursor is 0 at `RETURN`. |
 | **I-08 Bool default** | An empty bool stack at `RETURN` is treated as `true`. Pure projection programs never push to the bool stack. |
 
@@ -246,7 +244,7 @@ The binary encoding of WVM bytecode is not yet finalised. The following conventi
 - Field numbers are encoded as unsigned varints, supporting the full proto field number range (1–29999) without fixed-width overhead.
 - Immediate integer values are encoded as signed varints (zigzag for negative constants).
 - Bytes/string immediates are length-prefixed: a varint length followed by raw bytes.
-- `LABEL` references in `FRAME` and `RECURSE` operands are relative byte offsets from the start of the program, or named string labels resolved by the linker.
+- `LABEL` references in `FRAME` operands are relative byte offsets from the start of the program, or named string labels resolved by the linker.
 - A program header declares the register count required, enabling the runtime to pre-allocate the register file without scanning the bytecode.
 
 ---
@@ -255,7 +253,7 @@ The binary encoding of WVM bytecode is not yet finalised. The following conventi
 
 | # | Question |
 |---|---|
-| OQ-01 | **Packed repeated fields.** A packed `repeated int32` is a single `LEN` field whose body is concatenated varints. `RECURSE` will misparse it as a sub-message. Resolution: require schema annotation (`WireType` guard on `DISPATCH` arm) or add a `DECODE_PACKED` instruction family. |
+| OQ-01 | **Packed repeated fields.** A packed `repeated int32` is a single `LEN` field whose body is concatenated varints. `FRAME` will misparse it as a sub-message. Resolution: require schema annotation (`WireType` guard on `DISPATCH` arm) or add a `DECODE_PACKED` instruction family. |
 | OQ-02 | **Map fields.** Wire-encoded as `repeated LEN` containing `{key=1, value=2}` sub-messages. Map-entry filtering needs a `FRAME` that decodes the key register and gates `COPY` on a comparison. Expressible today but verbose; a `MAP_FRAME` sugar instruction may be warranted. |
 | OQ-03 | **Accumulator instructions** (`ACCUM`, `LOAD_ACCUM`) for repeated field quantifiers (`exists`, `all`). Deferred to v2. |
 | OQ-04 | **Register file size.** 16 registers covers all v1 programs. Overflow strategy (error vs. spill to heap map) to be decided before finalising the binary encoding. |
@@ -267,7 +265,7 @@ The binary encoding of WVM bytecode is not yet finalised. The following conventi
 
 | Instruction | Category | Operands |
 |---|---|---|
-| `DISPATCH` | Control | `default: SKIP\|COPY\|RECURSE(label)`; arm list |
+| `DISPATCH` | Control | `default: SKIP\|COPY`; arm list |
 | `FRAME` | Scope | program reference (label or inline) |
 | `LABEL` | Scope | name |
 | `CMP_EQ` | Predicate | `reg, imm` |

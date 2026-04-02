@@ -21,7 +21,6 @@ Then manually update `tests/testdata/testdata.rs` to match (prost-generated stru
 
 - **Compiler and runtime are independent.** Neither depends on the other. The compiler produces bytecode bytes, the runtime consumes them. Do not add cross-dependencies.
 - **`wql-runtime` is `no_std`.** No `std` imports, no heap allocation on the hot path. The register file and frame stack are stack-allocated.
-- **`Recurse` exists in the IR/runtime but the compiler does not emit it.** Deep search was removed; the instruction is kept for potential future use by external bytecode producers.
 - **Deep exclusion (`..-field`) expands at bind time.** The binder walks the schema tree and produces regular Copy projections with exclusions. The emitter sees no special construct — no new IR instructions were needed.
 - **Schema-free mode rejects features that require schema traversal** (deep exclusion, named fields). This is intentional, not a TODO.
 

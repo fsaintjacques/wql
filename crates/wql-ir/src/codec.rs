@@ -30,7 +30,7 @@ pub enum DecodeError {
     UnknownOpcode { offset: usize, opcode: u8 },
     /// A varint or byte sequence extends past end of bytecode.
     UnexpectedEof,
-    /// A `FRAME`/`RECURSE` target is out of bounds or not a `LABEL`.
+    /// A `FRAME` target is out of bounds or not a `LABEL`.
     InvalidTarget(u32),
     /// A `DISPATCH` arm had an empty action list.
     EmptyArmActions,
@@ -328,11 +328,8 @@ fn instruction_size(instr: &Instruction, label_offsets: &[u32]) -> usize {
                 + values.iter().map(|v| svarint_size(*v)).sum::<usize>()
         }
 
-        Instruction::Dispatch { default, arms } => {
+        Instruction::Dispatch { arms, .. } => {
             let mut s = 1 + 1; // opcode + default_kind
-            if let DefaultAction::Recurse(idx) = default {
-                s += uvarint_size(resolve(label_offsets, *idx));
-            }
             s += uvarint_size(arms.len() as u64);
             for arm in arms {
                 s += 1; // match_kind
@@ -483,10 +480,6 @@ fn encode_instruction(w: &mut Writer, instr: &Instruction, label_offsets: &[u32]
             match default {
                 DefaultAction::Skip => w.put_u8(0),
                 DefaultAction::Copy => w.put_u8(1),
-                DefaultAction::Recurse(idx) => {
-                    w.put_u8(2);
-                    w.put_uvarint(resolve(label_offsets, *idx));
-                }
             }
             w.put_uvarint(arms.len() as u64);
             for arm in arms {
@@ -566,14 +559,11 @@ fn compute_register_count(instructions: &[Instruction]) -> u8 {
 
 #[allow(clippy::cast_possible_truncation)] // capped at 255
 fn compute_max_frame_depth(instructions: &[Instruction]) -> u8 {
-    // Count distinct labels that are referenced by Frame or Recurse actions.
+    // Count distinct labels that are referenced by Frame actions.
     // This is a tighter upper bound than counting all labels.
     let mut referenced_labels = alloc::collections::BTreeSet::new();
     for instr in instructions {
-        if let Instruction::Dispatch { default, arms } = instr {
-            if let DefaultAction::Recurse(idx) = default {
-                referenced_labels.insert(*idx);
-            }
+        if let Instruction::Dispatch { arms, .. } = instr {
             for arm in arms {
                 for action in &arm.actions {
                     if let ArmAction::Frame(idx) = action {
@@ -607,8 +597,8 @@ fn compute_flags(instructions: &[Instruction]) -> u16 {
     for instr in instructions {
         match instr {
             Instruction::Dispatch { default, arms } => {
-                // Projection: default Copy/Recurse, or arms with Copy/Frame
-                if matches!(default, DefaultAction::Copy | DefaultAction::Recurse(_)) {
+                // Projection: default Copy, or arms with Copy/Frame
+                if matches!(default, DefaultAction::Copy) {
                     flags |= FLAG_HAS_PROJECTION;
                 }
                 for arm in arms {
@@ -704,8 +694,7 @@ fn check_reg_decode(reg: u8) -> Result<(), DecodeError> {
 }
 
 /// Decode a single instruction from the reader, returning raw byte
-/// offsets for any FRAME/RECURSE targets (not yet resolved to label
-/// indices).
+/// offsets for any FRAME targets (not yet resolved to label indices).
 #[allow(clippy::too_many_lines)]
 fn decode_instruction(r: &mut Reader<'_>, start_offset: usize) -> Result<Instruction, DecodeError> {
     let opcode = r.read_u8()?;
@@ -852,10 +841,6 @@ fn decode_dispatch(r: &mut Reader<'_>) -> Result<Instruction, DecodeError> {
     let default = match default_kind {
         0 => DefaultAction::Skip,
         1 => DefaultAction::Copy,
-        2 => {
-            let target = r.read_uvarint_as_u32()?;
-            DefaultAction::Recurse(target)
-        }
         _ => {
             return Err(DecodeError::UnknownOpcode {
                 offset: r.pos - 1,
@@ -946,10 +931,7 @@ fn resolve_targets_to_labels(
     };
 
     for instr in instructions.iter_mut() {
-        if let Instruction::Dispatch { default, arms } = instr {
-            if let DefaultAction::Recurse(ref mut target) = default {
-                *target = lookup(*target)?;
-            }
+        if let Instruction::Dispatch { arms, .. } = instr {
             for arm in arms {
                 for action in &mut arm.actions {
                     if let ArmAction::Frame(ref mut target) = action {
@@ -964,9 +946,8 @@ fn resolve_targets_to_labels(
 
 /// Decode a complete WVM program binary into a header and instruction list.
 ///
-/// Target `u32` values in [`DefaultAction::Recurse`] and
-/// [`ArmAction::Frame`] are returned as **label indices** (matching the
-/// convention expected by [`encode`]).
+/// Target `u32` values in [`ArmAction::Frame`] are returned as **label
+/// indices** (matching the convention expected by [`encode`]).
 ///
 /// # Errors
 ///
@@ -1150,28 +1131,6 @@ mod tests {
         roundtrip_with_bytes(
             &instructions,
             &[0x00, 0x01, 0x01, 0x00, 0x02, 0x01, 0x00, 0x15],
-        );
-    }
-
-    #[test]
-    fn roundtrip_dispatch_recurse() {
-        let instructions = vec![
-            Instruction::Label, // label 0, at byte offset 0
-            Instruction::Dispatch {
-                default: DefaultAction::Recurse(0), // → label 0
-                arms: vec![DispatchArm {
-                    match_: ArmMatch::Field(1),
-                    actions: vec![ArmAction::Copy],
-                }],
-            },
-            Instruction::Return,
-        ];
-        // LABEL:    01
-        // DISPATCH: 00 02 00 01 00 01 01 00  (recurse target=0x00)
-        // RETURN:   15
-        roundtrip_with_bytes(
-            &instructions,
-            &[0x01, 0x00, 0x02, 0x00, 0x01, 0x00, 0x01, 0x01, 0x00, 0x15],
         );
     }
 

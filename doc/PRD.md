@@ -324,7 +324,7 @@ Unknown field preservation is the critical safety property for production deploy
 
 The `...` trailer maps to `default: COPY` in the WVM `DISPATCH` instruction — unknown fields at that nesting level are forwarded verbatim. Without it, `default: SKIP` is used and new fields are silently dropped.
 
-The `{ .. }` and `{ .. -field }` forms are inherently schema-evolution safe: they use `default: RECURSE` which enters and re-frames any unknown sub-message, preserving its contents (minus the excluded fields). A `{ .. -embedding }` projection compiled today will correctly strip `embedding` from any future schema version that restructures or renames surrounding fields, because it operates by field number at every level rather than against a fixed path.
+The `{ .. }` and `{ .. -field }` forms are inherently schema-evolution safe: the compiler expands exclusions at bind time into explicit `FRAME`/`COPY` instructions at each schema level, preserving contents minus the excluded fields. A `{ .. -embedding }` projection compiled today will correctly strip `embedding` from any future schema version that restructures or renames surrounding fields, because it operates by field number at every level rather than against a fixed path.
 
 **Recommendation:** any program that re-publishes projected messages downstream (broker transforms, stream processors) should use either the `...` clause on inclusion projections or the `{ .. -field }` exclusion form. Consumers projecting for their own deserialization may safely use strict inclusion mode.
 

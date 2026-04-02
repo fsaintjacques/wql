@@ -222,7 +222,7 @@ fn eval_empty_input_with_depth_runs_vm() {
     assert!(!result.matched);
 }
 
-// ── Nested projection tests (FRAME / RECURSE) ──
+// ── Nested projection tests (FRAME) ──
 
 /// Build an Outer { id: u32 = 1, inner: Inner = 2 }
 /// Inner { name: string = 1, value: u32 = 2 }
@@ -349,89 +349,6 @@ fn frame_empty_sub() {
     // Expected: just field 2 with empty sub-message.
     let expected = encode_len_field(2, &[]);
     assert_eq!(output, expected);
-}
-
-#[test]
-fn recurse_deep_search() {
-    // LABEL(L0), DISPATCH(RECURSE(L0), [1→COPY])
-    // Field 1 exists only at depth 3.
-    let program = make_program(&[
-        Instruction::Label, // L0
-        Instruction::Dispatch {
-            default: DefaultAction::Recurse(0),
-            arms: vec![DispatchArm {
-                match_: ArmMatch::Field(1),
-                actions: vec![ArmAction::Copy],
-            }],
-        },
-        Instruction::Return,
-    ]);
-
-    // depth 0: { 2: { 2: { 1: 42 } } }
-    let innermost = encode_varint_field(1, 42);
-    let mid = encode_len_field(2, &innermost);
-    let outer = encode_len_field(2, &mid);
-
-    let output = run_project(&program, &outer).unwrap();
-
-    // RECURSE re-emits the nesting structure for LEN fields.
-    let exp_inner = encode_varint_field(1, 42);
-    let exp_mid = encode_len_field(2, &exp_inner);
-    let exp_outer = encode_len_field(2, &exp_mid);
-    assert_eq!(output, exp_outer);
-}
-
-#[test]
-fn recurse_no_match() {
-    // RECURSE over nested messages with no field 1 anywhere → output empty.
-    let program = make_program(&[
-        Instruction::Label, // L0
-        Instruction::Dispatch {
-            default: DefaultAction::Recurse(0),
-            arms: vec![DispatchArm {
-                match_: ArmMatch::Field(1),
-                actions: vec![ArmAction::Copy],
-            }],
-        },
-        Instruction::Return,
-    ]);
-
-    // Only field 2 and 3, no field 1 anywhere.
-    let inner = encode_varint_field(3, 10);
-    let outer = encode_len_field(2, &inner);
-
-    let output = run_project(&program, &outer).unwrap();
-
-    // Field 2 recurses into sub-message, finds no field 1 → sub-output is 0 bytes.
-    // The enclosing RECURSE emits tag + length(0) for the LEN field.
-    let expected = encode_len_field(2, &[]);
-    assert_eq!(output, expected);
-}
-
-#[test]
-fn frame_depth_exceeded() {
-    // Program with RECURSE, but input nests deeper than max_frame_depth.
-    let program = make_program(&[
-        Instruction::Label, // L0
-        Instruction::Dispatch {
-            default: DefaultAction::Recurse(0),
-            arms: vec![DispatchArm {
-                match_: ArmMatch::Field(1),
-                actions: vec![ArmAction::Copy],
-            }],
-        },
-        Instruction::Return,
-    ]);
-
-    // 10 levels of nesting — will exceed max_frame_depth.
-    let mut msg = encode_varint_field(1, 1);
-    for _ in 0..10 {
-        msg = encode_len_field(2, &msg);
-    }
-
-    let mut output = vec![0u8; msg.len() + 64];
-    let result = program.eval(&msg, &mut output);
-    assert_eq!(result, Err(RuntimeError::FrameDepthExceeded));
 }
 
 // ── Filter / predicate tests ──

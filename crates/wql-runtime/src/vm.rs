@@ -115,12 +115,6 @@ impl<'prog, 'input> Vm<'prog, 'input> {
                                     cursor = copy_field(output, cursor, &field)?;
                                 }
                                 DefaultAction::Skip => {}
-                                DefaultAction::Recurse(label_idx) => {
-                                    if field.wire_type == WireType::Len {
-                                        cursor =
-                                            self.execute_frame(*label_idx, &field, output, cursor)?;
-                                    }
-                                }
                             }
                         }
                     }

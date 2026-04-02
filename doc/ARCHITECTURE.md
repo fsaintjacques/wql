@@ -94,7 +94,7 @@ wql-ir  (no_std + alloc)
 - Register indices: single `u8`
 - Integer immediates: signed LEB128 (zigzag)
 - Bytes/string immediates: LEB128 length prefix + raw bytes
-- Label references: signed LEB128 byte offset from the start of the bytecode. Negative = backward (RECURSE self-reference). Positive = forward (FRAME to a later LABEL).
+- Label references: unsigned LEB128 byte offset from the start of the bytecode. Forward references point to a later LABEL.
 
 ---
 
@@ -201,7 +201,7 @@ IrEmitter(BoundAst)  →  Vec<Instruction>  +  LabelMap
     ▼
 Linker(Vec<Instruction>, LabelMap)  →  Vec<u8>
     │  (two-pass: collect label byte offsets,
-    │   patch FRAME/RECURSE references,
+    │   patch FRAME references,
     │   write ProgramHeader, serialize instructions)
     ▼
 bytecode: Vec<u8>

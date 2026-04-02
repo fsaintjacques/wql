@@ -68,14 +68,6 @@ pub enum DefaultAction {
     Skip,
     /// Emit tag + raw value bytes verbatim to the output buffer.
     Copy,
-    /// If `wire_type == LEN`: push new scan window, re-run the program at
-    /// the target label, emit tag + reframed sub-output.
-    /// If `wire_type != LEN`: skip.
-    ///
-    /// The `u32` is a **label index** (0-based among `Instruction::Label`
-    /// entries in the instruction list). The encoder resolves this to an
-    /// absolute byte offset in the bytecode.
-    Recurse(u32),
 }
 
 /// Field match within a single `DISPATCH` arm.
@@ -203,7 +195,7 @@ pub const VERSION: u16 = 1;
 
 /// Header flag: program contains at least one `BYTES_MATCHES` instruction.
 pub const FLAG_REGEX_REQUIRED: u16 = 0x0001;
-/// Header flag: program contains projection logic (Copy/Frame/Recurse in DISPATCH).
+/// Header flag: program contains projection logic (Copy/Frame in DISPATCH).
 pub const FLAG_HAS_PROJECTION: u16 = 0x0002;
 /// Header flag: program contains predicate logic (comparison/logic instructions).
 pub const FLAG_HAS_PREDICATE: u16 = 0x0004;

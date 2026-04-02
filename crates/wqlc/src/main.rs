@@ -413,7 +413,6 @@ fn format_default(d: &wql_ir::DefaultAction) -> String {
     match d {
         wql_ir::DefaultAction::Skip => "Skip".into(),
         wql_ir::DefaultAction::Copy => "Copy".into(),
-        wql_ir::DefaultAction::Recurse(idx) => format!("Recurse(L{idx})"),
     }
 }
 
