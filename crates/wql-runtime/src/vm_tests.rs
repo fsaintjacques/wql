@@ -351,6 +351,41 @@ fn frame_empty_sub() {
     assert_eq!(output, expected);
 }
 
+#[test]
+fn frame_depth_exceeded() {
+    // L0's sub-program re-enters L0 on field 2, so nesting deeper than
+    // max_frame_depth (= 1 distinct label) triggers the error.
+    let program = make_program(&[
+        Instruction::Dispatch {
+            default: DefaultAction::Skip,
+            arms: vec![DispatchArm {
+                match_: ArmMatch::Field(2),
+                actions: vec![ArmAction::Frame(0)],
+            }],
+        },
+        Instruction::Return,
+        Instruction::Label, // L0
+        Instruction::Dispatch {
+            default: DefaultAction::Skip,
+            arms: vec![DispatchArm {
+                match_: ArmMatch::Field(2),
+                actions: vec![ArmAction::Frame(0)],
+            }],
+        },
+        Instruction::Return,
+    ]);
+
+    // 4 levels of nesting to exceed max_frame_depth of 1.
+    let d3 = encode_varint_field(2, 1);
+    let d2 = encode_len_field(2, &d3);
+    let d1 = encode_len_field(2, &d2);
+    let outer = encode_len_field(2, &d1);
+
+    let mut output = vec![0u8; outer.len() + 64];
+    let result = program.eval(&outer, &mut output);
+    assert_eq!(result, Err(RuntimeError::FrameDepthExceeded));
+}
+
 // ── Filter / predicate tests ──
 //
 // Proto structure: message { age: uint32 = 1, name: string = 2, status: uint32 = 3 }
