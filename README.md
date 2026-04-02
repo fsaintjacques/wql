@@ -185,6 +185,11 @@ typedef struct {
     bool      matched;     // predicate result (true when no predicate)
 } wql_eval_result_t;
 
+// Evaluate a program against input bytes.
+// Returns 0 on success, -1 on error. On success, *result is populated.
+// For filter-only programs, pass output=NULL / output_len=0.
+// For project-only programs, result->matched is always true.
+// Buffer sizing: output_len >= input_len is always sufficient.
 int32_t wql_eval(const wql_program_t* prog,
                  const uint8_t* input, size_t input_len,
                  uint8_t* output, size_t output_len,
@@ -198,6 +203,59 @@ void wql_errmsg_free(char* msg);
 ```
 
 Thread-safe: `wql_eval` takes `const wql_program_t*` and can be called concurrently. For filter-only programs, pass `output=NULL` / `output_len=0`.
+
+### Example
+
+```c
+#include "wql.h"
+#include <string.h>
+#include <stdio.h>
+
+int main(void) {
+    char *err = NULL;
+
+    /* 1. Compile a query to bytecode */
+    struct wql_bytes_t bc = wql_compile("WHERE #1 > 10 SELECT { #2 }", &err);
+    if (bc.data == NULL) {
+        fprintf(stderr, "compile error: %s\n", err);
+        wql_errmsg_free(err);
+        return 1;
+    }
+
+    /* 2. Load bytecode into a reusable program handle */
+    struct wql_program_t *prog = wql_program_load(bc.data, bc.len, &err);
+    wql_bytes_free(bc);
+    if (prog == NULL) {
+        fprintf(stderr, "load error: %s\n", err);
+        wql_errmsg_free(err);
+        return 1;
+    }
+
+    /* 3. Evaluate against a protobuf message */
+    uint8_t output[4096];
+    struct wql_eval_result_t result;
+    memset(&result, 0, sizeof(result));
+
+    int rc = wql_eval(prog, input, input_len,
+                      output, sizeof(output),
+                      &result, &err);
+    if (rc != 0) {
+        fprintf(stderr, "eval error: %s\n", err);
+        wql_errmsg_free(err);
+        wql_program_free(prog);
+        return 1;
+    }
+
+    if (result.matched) {
+        /* Predicate passed — projected bytes are in output[..result.output_len] */
+        fwrite(output, 1, result.output_len, stdout);
+    }
+
+    /* 4. Cleanup */
+    wql_program_free(prog);
+    return 0;
+}
+```
 
 ## License
 
