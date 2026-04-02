@@ -84,9 +84,12 @@ impl LoadedProgram {
     /// `max_frame_depth > 0`.
     ///
     /// # Errors
-    /// Returns `RuntimeError::OutputBufferTooSmall` if `output` is too small
-    /// for a program with projection, or `RuntimeError::MalformedInput` if
-    /// the input is not valid protobuf.
+    /// Returns `RuntimeError::MalformedInput` if the input is not valid
+    /// protobuf, or `RuntimeError::OutputBufferTooSmall` if a flat
+    /// projection program (no nested frames) gets an undersized buffer.
+    /// Programs with `max_frame_depth > 0` allocate scratch internally
+    /// when the buffer is too small, discarding projected output
+    /// (`output_len = 0`).
     pub fn eval(&self, input: &[u8], output: &mut [u8]) -> Result<EvalResult, RuntimeError> {
         let depth = self.header.max_frame_depth;
         let required = input.len() + 5 * usize::from(depth);
