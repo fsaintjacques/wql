@@ -215,7 +215,7 @@ int main(void) {
     char *err = NULL;
 
     /* 1. Compile a query to bytecode */
-    struct wql_bytes_t bc = wql_compile("WHERE #1 > 10 SELECT { #2 }", &err);
+    wql_bytes_t bc = wql_compile("WHERE #1 > 10 SELECT { #2 }", &err);
     if (bc.data == NULL) {
         fprintf(stderr, "compile error: %s\n", err);
         wql_errmsg_free(err);
@@ -223,7 +223,7 @@ int main(void) {
     }
 
     /* 2. Load bytecode into a reusable program handle */
-    struct wql_program_t *prog = wql_program_load(bc.data, bc.len, &err);
+    wql_program_t *prog = wql_program_load(bc.data, bc.len, &err);
     wql_bytes_free(bc);
     if (prog == NULL) {
         fprintf(stderr, "load error: %s\n", err);
@@ -232,8 +232,11 @@ int main(void) {
     }
 
     /* 3. Evaluate against a protobuf message */
+    const uint8_t *input = /* your protobuf bytes */ NULL;
+    size_t input_len = /* byte count */ 0;
+
     uint8_t output[4096];
-    struct wql_eval_result_t result;
+    wql_eval_result_t result;
     memset(&result, 0, sizeof(result));
 
     int rc = wql_eval(prog, input, input_len,
