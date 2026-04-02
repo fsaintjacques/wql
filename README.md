@@ -104,20 +104,18 @@ WHERE age > 18 SELECT { name, address { city } }
 use wql_runtime::LoadedProgram;
 
 let program = LoadedProgram::from_bytes(&bytecode)?;
-
-// Filter
-let matched = wql_runtime::filter(&program, &input)?;
-
-// Project
 let mut output = vec![0u8; input.len() * 2];
-let n = wql_runtime::project(&program, &input, &mut output)?;
 
-// Filter + Project
-match wql_runtime::project_and_filter(&program, &input, &mut output)? {
-    Some(n) => { /* matched; output[..n] is the projected message */ }
-    None    => { /* filtered out */ }
+let result = program.eval(&input, &mut output)?;
+// result.matched  — true if the record passed the predicate (always true when no predicate)
+// result.output_len — bytes written to output (0 when no projection)
+
+if result.matched && result.output_len > 0 {
+    let projected = &output[..result.output_len];
 }
 ```
+
+The program header determines what happens — callers don't need to know whether the query is a filter, projection, or both. Pass `&mut []` when you only care about filtering.
 
 ### Compiler (std)
 
@@ -138,7 +136,7 @@ WQL is split into independent crates with a strict dependency graph:
 
 ```
 wql-ir  (no_std + alloc)         — shared IR types + bytecode codec
-  ├──▶ wql-runtime  (no_std)     — interpreter, 3-function API
+  ├──▶ wql-runtime  (no_std)     — interpreter (LoadedProgram::eval)
   ├──▶ wql-compiler (std)        — parser → binder → emitter → linker
   ├──▶ wql-capi     (std, cdylib)— C FFI layer
   └──▶ wqlc         (std, bin)   — CLI tool
@@ -165,7 +163,7 @@ See [doc/IR.md](doc/IR.md) for the full specification and [doc/ARCHITECTURE.md](
 
 ## C FFI
 
-The `wql-capi` crate produces `libwql` with a stable C ABI. The workflow is: compile query to bytecode, load bytecode into a program handle, execute against input bytes.
+The `wql-capi` crate produces `libwql` with a stable C ABI. The workflow is: compile query to bytecode, load bytecode into a program handle, evaluate against input bytes.
 
 ```c
 // Compile (schema-free)
@@ -181,20 +179,17 @@ wql_bytes_t wql_compile_with_schema(
 // Load bytecode into a reusable program handle
 wql_program_t* wql_program_load(const uint8_t* bytecode, size_t len, char** errmsg);
 
-// Execute
-int32_t wql_filter(const wql_program_t* prog,
-                   const uint8_t* input, size_t input_len,
-                   char** errmsg);               // 1=pass, 0=filtered, -1=error
+// Evaluate — single entry point for filter, project, or both
+typedef struct {
+    uintptr_t output_len;  // bytes written (0 when no projection)
+    bool      matched;     // predicate result (true when no predicate)
+} wql_eval_result_t;
 
-int64_t wql_project(const wql_program_t* prog,
-                    const uint8_t* input, size_t input_len,
-                    uint8_t* output, size_t output_len,
-                    char** errmsg);               // bytes written, or -1=error
-
-int64_t wql_project_and_filter(const wql_program_t* prog,
-                               const uint8_t* input, size_t input_len,
-                               uint8_t* output, size_t output_len,
-                               char** errmsg);    // bytes written, -1=filtered, -2=error
+int32_t wql_eval(const wql_program_t* prog,
+                 const uint8_t* input, size_t input_len,
+                 uint8_t* output, size_t output_len,
+                 wql_eval_result_t* result,
+                 char** errmsg);                  // 0=ok, -1=error
 
 // Cleanup
 void wql_program_free(wql_program_t* prog);
@@ -202,7 +197,7 @@ void wql_bytes_free(wql_bytes_t bytes);
 void wql_errmsg_free(char* msg);
 ```
 
-Thread-safe: all execution functions take `const wql_program_t*` and can be called concurrently.
+Thread-safe: `wql_eval` takes `const wql_program_t*` and can be called concurrently. For filter-only programs, pass `output=NULL` / `output_len=0`.
 
 ## License
 
