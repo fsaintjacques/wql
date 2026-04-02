@@ -63,8 +63,6 @@ pub enum BoundProjectionItem {
         field: BoundField,
         projection: Box<BoundProjection>,
     },
-    /// Deep field search at any nesting depth.
-    DeepSearch(BoundField),
 }
 
 #[derive(Debug)]
@@ -143,9 +141,6 @@ fn bind_items_sf(items: &[ProjectionItem]) -> Result<Vec<BoundProjectionItem>, C
                 field: require_number(field)?,
                 projection: Box::new(bind_projection_sf(projection)?),
             }),
-            ProjectionItem::DeepSearch(f) => {
-                Ok(BoundProjectionItem::DeepSearch(require_number(f)?))
-            }
         })
         .collect()
 }
@@ -702,13 +697,6 @@ fn bind_projection_item_schema(
                 },
                 projection: Box::new(bind_projection_schema(projection, nested_msg, fds)?),
             })
-        }
-        ProjectionItem::DeepSearch(f) => {
-            let (num, _) = resolve_field_ref(f, msg)?;
-            Ok(BoundProjectionItem::DeepSearch(BoundField {
-                field_num: num,
-                span: f.span(),
-            }))
         }
     }
 }

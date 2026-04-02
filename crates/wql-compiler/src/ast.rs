@@ -51,8 +51,6 @@ pub enum ProjectionItem {
         projection: Box<Projection>,
     },
 
-    /// `..name` or `..#1` — find and copy field at any nesting depth.
-    DeepSearch(FieldRef),
 }
 
 // ──────────────────────────────────── Field references ────

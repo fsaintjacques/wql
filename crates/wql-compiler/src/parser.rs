@@ -75,8 +75,8 @@ impl<'a> Parser<'a> {
         }
 
         // Parse comma-separated entries until `}`.
-        // Entries: field, field { }, ..field (deep search), -field (exclusion).
-        // A bare `..` (not followed by field) terminates as Copy mode.
+        // Entries: field, field { }, -field (exclusion).
+        // A bare `..` terminates as Copy mode.
         let mut items = Vec::new();
         let mut exclusions = Vec::new();
 
@@ -84,15 +84,8 @@ impl<'a> Parser<'a> {
             match self.peek_kind()? {
                 TokenKind::DotDot => {
                     self.lexer.next_token()?;
-                    match self.peek_kind()? {
-                        // `..field` — deep search item
-                        TokenKind::Ident(_) | TokenKind::Hash => {
-                            let field = self.parse_field_ref()?;
-                            items.push(ProjectionItem::DeepSearch(field));
-                        }
-                        // bare `..` — copy terminator, must be last before `}`
-                        _ => return Ok(ProjectionKind::Copy { items, exclusions }),
-                    }
+                    // bare `..` — copy terminator
+                    return Ok(ProjectionKind::Copy { items, exclusions });
                 }
                 TokenKind::Minus => {
                     self.lexer.next_token()?;
@@ -140,13 +133,6 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_projection_item(&mut self) -> Result<ProjectionItem, ParseError> {
-        // Deep search: `..field`
-        if matches!(self.peek_kind()?, TokenKind::DotDot) {
-            self.lexer.next_token()?;
-            let field = self.parse_field_ref()?;
-            return Ok(ProjectionItem::DeepSearch(field));
-        }
-
         let field = self.parse_field_ref()?;
 
         // Nested: `field { ... }`
@@ -666,8 +652,6 @@ mod tests {
                 field: FieldRef::Number(n, _),
                 ..
             } => format!("#{n}{{...}}"),
-            ProjectionItem::DeepSearch(FieldRef::Name(n, _)) => format!("..{n}"),
-            ProjectionItem::DeepSearch(FieldRef::Number(n, _)) => format!("..#{n}"),
         }
     }
 
@@ -737,24 +721,6 @@ mod tests {
     }
 
     #[test]
-    fn proj_deep_search() {
-        let proj = parse_proj("{ ..name }").unwrap();
-        assert_strict(&proj, &["..name"]);
-    }
-
-    #[test]
-    fn proj_scoped_deep() {
-        let proj = parse_proj("{ departments { ..name } }").unwrap();
-        assert_strict(&proj, &["departments{...}"]);
-
-        if let ProjectionKind::Strict { items } = &proj.kind {
-            if let ProjectionItem::Nested { projection, .. } = &items[0] {
-                assert_strict(projection, &["..name"]);
-            }
-        }
-    }
-
-    #[test]
     fn proj_field_number() {
         let proj = parse_proj("{ #1, #3 { #1 } }").unwrap();
         assert_strict(&proj, &["#1", "#3{...}"]);
@@ -792,6 +758,14 @@ mod tests {
     fn proj_mixed_items_copy() {
         let proj = parse_proj("{ name, address { city }, .. }").unwrap();
         assert_copy(&proj, &["name", "address{...}"], 0);
+    }
+
+    #[test]
+    fn proj_err_deep_search_removed() {
+        // Deep search syntax `..field` is no longer supported.
+        // `..` immediately enters Copy mode, then `name` is unexpected.
+        let err = parse_proj("{ ..name }").unwrap_err();
+        assert!(matches!(err.kind, ParseErrorKind::Expected { .. }));
     }
 
     #[test]

@@ -460,8 +460,3 @@ age > 0
 {}
 ----
 false
-
-# ── Deep search ──
-
-# Deep search with schema requires recursive field resolution which is
-# not implemented. Tested via schema-free e2e.rs instead.

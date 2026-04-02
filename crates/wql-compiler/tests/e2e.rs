@@ -381,48 +381,6 @@ fn project_field_not_present() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// Deep search tests
-// ═══════════════════════════════════════════════════════════════════════
-
-#[test]
-fn project_deep_search_finds_nested() {
-    // { ..#1 } — find field 1 at any depth via Recurse.
-    // Outer message has field 3 (LEN sub-message) containing field 1 (varint).
-    let inner = build_message(&[proto_varint(1, 42), proto_varint(2, 99)]);
-    let input = build_message(&[proto_len(3, &inner)]);
-
-    let output = run_project("{ ..#1 }", &input);
-    // Recurse enters field 3 (LEN), finds field 1, copies it.
-    // The output should have field 3 reframed with only field 1 inside.
-    assert!(has_field(&output, 3));
-    let nested = extract_bytes(&output, 3).unwrap();
-    assert!(has_field(&nested, 1));
-    assert!(!has_field(&nested, 2));
-}
-
-#[test]
-fn project_deep_search_top_level() {
-    // { ..#1 } — field 1 is at the top level (varint), directly matched by the arm.
-    let input = build_message(&[proto_varint(1, 42), proto_varint(2, 99)]);
-
-    let output = run_project("{ ..#1 }", &input);
-    assert!(has_field(&output, 1));
-    assert!(!has_field(&output, 2));
-}
-
-#[test]
-fn project_deep_search_not_found() {
-    // { ..#9 } — field 9 doesn't exist anywhere.
-    let inner = build_message(&[proto_varint(1, 10)]);
-    let input = build_message(&[proto_len(3, &inner)]);
-
-    let output = run_project("{ ..#9 }", &input);
-    // Nothing matched — output should be the reframed sub-messages with no content
-    // (Recurse enters LEN fields but finds no #9).
-    assert!(!has_field(&output, 9));
-}
-
-// ═══════════════════════════════════════════════════════════════════════
 // Filter (predicate-only) tests
 // ═══════════════════════════════════════════════════════════════════════
 

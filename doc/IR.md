@@ -22,7 +22,7 @@ The IR is intentionally small: 19 instructions. It is designed to express exactl
 
 - **Single-pass.** A WVM program makes exactly one forward scan over the input byte sequence. There are no seek, rewind, or random-access instructions.
 - **Zero-copy for pure projections.** When a field is copied verbatim, the tag and value bytes are `memcpy`'d to the output buffer. No decoding occurs.
-- **Composable default actions.** The `DISPATCH` instruction carries a default action (`SKIP`, `COPY`, or `RECURSE`) that determines what happens to any field not explicitly matched. This single knob controls strict projection, unknown-field preservation, and deep search.
+- **Composable default actions.** The `DISPATCH` instruction carries a default action (`SKIP`, `COPY`, or `RECURSE`) that determines what happens to any field not explicitly matched. This single knob controls strict projection and unknown-field preservation.
 - **Unified IR.** Predicates and projections share the same instruction set and the same execution model. Every program produces both a bool result and an output byte count. The caller decides which to use.
 - **Always write, caller decides.** The output buffer is written during the scan unconditionally. If the bool result is false, the buffer contents are undefined and the caller must not read them. This avoids any rollback or conditional write path.
 - **Explicit nesting.** Sub-message scope is entered and exited explicitly via `FRAME`. Length prefixes are recomputed automatically on `FRAME` exit. Nesting can be arbitrarily deep.
@@ -88,7 +88,7 @@ The **default action** applies to every field that matches no explicit arm:
 |---|---|
 | `SKIP` | Consume value bytes, emit nothing. Strict projection — unknown fields are dropped. |
 | `COPY` | Emit tag + raw value bytes verbatim to output buffer. Unknown fields are preserved. Safe for schema evolution. |
-| `RECURSE(P)` | If `wire_type == LEN`: push new scan window, run program P inside it, emit tag + reframed length + sub-output. If `wire_type != LEN`: `SKIP`. Used for deep (`..`) search. |
+| `RECURSE(P)` | If `wire_type == LEN`: push new scan window, run program P inside it, emit tag + reframed length + sub-output. If `wire_type != LEN`: `SKIP`. |
 
 ### 5.2 Sub-message scope — `FRAME`
 
@@ -160,34 +160,7 @@ DISPATCH  default:COPY               -- preserve unknown address fields
 RETURN
 ```
 
-### 6.3 Deep field search
-
-Source: `{ ..name }` — find and copy field `name(1)` at any nesting depth.
-
-```
-LABEL(deep_prog)
-DISPATCH  default:RECURSE(deep_prog)
-  -- unmatched LEN fields: enter and re-run
-  -- unmatched non-LEN fields: SKIP
-  | Field(1)  → COPY                 -- name, wherever it appears
-RETURN
-```
-
-### 6.4 Scoped deep search inside repeated field
-
-Source: `{ departments { ..name } }`
-
-```
-DISPATCH  default:SKIP
-  | Field(5)  → FRAME(dept_prog)     -- departments repeated field
-
-LABEL(dept_prog)
-DISPATCH  default:RECURSE(dept_prog)
-  | Field(1)  → COPY                 -- name at any depth inside each department
-RETURN
-```
-
-### 6.5 Predicate only
+### 6.3 Predicate only
 
 Source: `age > 18 && address.city == "NYC"`
 
@@ -207,7 +180,7 @@ RETURN
 -- bool: predicate result; output: empty (no COPY instructions), cursor: 0
 ```
 
-### 6.6 Combined filter + projection, single pass
+### 6.4 Combined filter + projection, single pass
 
 Source: `WHERE age > 18 AND address.city == "NYC"  SELECT { name, address { city }, ... }`
 

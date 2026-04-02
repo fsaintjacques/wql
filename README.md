@@ -120,12 +120,6 @@ A projection selects which fields to keep in the output, wrapped in braces.
 { .. -payload, -thumbnail }        -- keep all except these fields
 ```
 
-**Deep search** (`..field`) — find a field at any nesting depth:
-
-```
-{ ..name }
-```
-
 ### Predicates
 
 A predicate is a boolean expression over field values.

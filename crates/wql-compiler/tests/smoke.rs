@@ -42,18 +42,6 @@ fn copy_with_exclusion() {
 }
 
 #[test]
-fn deep_field_search() {
-    let q = parse("{ departments { ..name } }").unwrap();
-    let Query::Projection(p) = q else {
-        panic!("expected Projection");
-    };
-    let ProjectionKind::Strict { items } = &p.kind else {
-        panic!("expected Strict");
-    };
-    assert!(matches!(&items[0], ProjectionItem::Nested { .. }));
-}
-
-#[test]
 fn schema_free_projection() {
     let q = parse("{ #1, #3 { #1, .. } }").unwrap();
     let Query::Projection(p) = q else {

@@ -96,26 +96,10 @@ fn emit_projection(emitter: &mut Emitter, proj: &BoundProjection) -> Result<(), 
 fn emit_strict(emitter: &mut Emitter, items: &[BoundProjectionItem]) -> Result<(), CompileError> {
     let mut arms = Vec::new();
     let mut deferred: Vec<DeferredNested<'_>> = Vec::new();
-    let mut has_deep_search = false;
-
-    for item in items {
-        if matches!(item, BoundProjectionItem::DeepSearch(_)) {
-            has_deep_search = true;
-            break;
-        }
-    }
-
-    let self_label = if has_deep_search {
-        let label = emitter.alloc_label();
-        emitter.push(Instruction::Label);
-        Some(label)
-    } else {
-        None
-    };
 
     for item in items {
         match item {
-            BoundProjectionItem::Field(f) | BoundProjectionItem::DeepSearch(f) => {
+            BoundProjectionItem::Field(f) => {
                 arms.push(DispatchArm {
                     match_: ArmMatch::Field(f.field_num),
                     actions: vec![ArmAction::Copy],
@@ -132,13 +116,10 @@ fn emit_strict(emitter: &mut Emitter, items: &[BoundProjectionItem]) -> Result<(
         }
     }
 
-    let default = if has_deep_search {
-        DefaultAction::Recurse(self_label.expect("self_label set when has_deep_search"))
-    } else {
-        DefaultAction::Skip
-    };
-
-    emitter.push(Instruction::Dispatch { default, arms });
+    emitter.push(Instruction::Dispatch {
+        default: DefaultAction::Skip,
+        arms,
+    });
     emitter.push(Instruction::Return);
 
     for nested in deferred {
@@ -160,8 +141,8 @@ fn emit_copy(
     // Copy mode always uses DefaultAction::Copy (shallow copy) to preserve
     // all unmatched fields verbatim. Exclusions apply at the current level only.
 
-    // Only Nested items need explicit Frame arms. Field/DeepSearch items
-    // are handled by the DefaultAction::Copy — no explicit arm needed.
+    // Only Nested items need explicit Frame arms. Field items are handled
+    // by the DefaultAction::Copy — no explicit arm needed.
     for item in items {
         if let BoundProjectionItem::Nested { field, projection } = item {
             let label = emitter.alloc_label();
@@ -841,7 +822,7 @@ fn build_combined_dispatch<'a>(
     };
     for item in items {
         match item {
-            BoundProjectionItem::Field(f) | BoundProjectionItem::DeepSearch(f) => {
+            BoundProjectionItem::Field(f) => {
                 arms_map
                     .entry(f.field_num)
                     .or_default()
@@ -966,7 +947,7 @@ fn emit_combined_nested_projection(
 
     for item in items {
         match item {
-            BoundProjectionItem::Field(f) | BoundProjectionItem::DeepSearch(f) => {
+            BoundProjectionItem::Field(f) => {
                 arms.push(DispatchArm {
                     match_: ArmMatch::Field(f.field_num),
                     actions: vec![ArmAction::Copy],
@@ -1214,22 +1195,6 @@ mod tests {
                 assert_eq!(arms.len(), 1);
                 assert_eq!(arms[0].match_, ArmMatch::Field(7));
                 assert_eq!(arms[0].actions, vec![ArmAction::Skip]);
-            }
-            other => panic!("expected Dispatch, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn emit_deep_search() {
-        let instrs = compile_and_decode("{ ..#1 }");
-        assert_eq!(instrs.len(), 3);
-        assert_eq!(instrs[0], Instruction::Label);
-        match &instrs[1] {
-            Instruction::Dispatch { default, arms } => {
-                assert!(matches!(default, DefaultAction::Recurse(_)));
-                assert_eq!(arms.len(), 1);
-                assert_eq!(arms[0].match_, ArmMatch::Field(1));
-                assert_eq!(arms[0].actions, vec![ArmAction::Copy]);
             }
             other => panic!("expected Dispatch, got {other:?}"),
         }
