@@ -30,9 +30,9 @@ pub struct wql_bytes_t {
     pub len: usize,
 }
 
-/// Program contains predicate logic — use `wql_filter` or `wql_project_and_filter`.
+/// Program contains predicate logic.
 pub const WQL_PROGRAM_FILTER: u8 = 0x01;
-/// Program contains projection logic — use `wql_project` or `wql_project_and_filter`.
+/// Program contains projection logic.
 pub const WQL_PROGRAM_PROJECT: u8 = 0x02;
 
 /// Program metadata returned by `wql_program_info`.
@@ -221,19 +221,79 @@ pub unsafe extern "C" fn wql_program_info(
     info.max_frame_depth = header.max_frame_depth;
 }
 
+/// Result of `wql_eval`. Zero-initialize before calling.
+#[repr(C)]
+pub struct wql_eval_result_t {
+    /// Bytes written to the output buffer (0 when the program has no projection).
+    pub output_len: usize,
+    /// Whether the record passed the predicate (`true` when no predicate).
+    pub matched: bool,
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Execution
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Run a filter (predicate-only) program on input bytes.
+/// Evaluate a WQL program against input bytes.
 ///
-/// Returns 1 if the record passes, 0 if filtered out, -1 on error.
+/// Returns 0 on success, -1 on error. On success, `*result` is populated.
+/// On error, `*errmsg` (if non-null) is set.
+///
+/// For filter-only programs, pass `output = NULL` / `output_len = 0`.
+/// For project-only programs, `result->matched` is always `true`.
+///
+/// **Buffer sizing:** `output_len >= input_len` is always sufficient.
 ///
 /// # Safety
 ///
 /// - `program` must be a valid pointer from `wql_program_load`.
 /// - `input` must point to `input_len` valid bytes.
+/// - `output` (if non-null) must point to `output_len` writable bytes.
+/// - `result` must point to a valid `wql_eval_result_t`.
 /// - `errmsg`, if non-null, must point to a valid `*mut c_char` location.
+#[no_mangle]
+pub unsafe extern "C" fn wql_eval(
+    program: *const wql_program_t,
+    input: *const u8,
+    input_len: usize,
+    output: *mut u8,
+    output_len: usize,
+    result: *mut wql_eval_result_t,
+    errmsg: *mut *mut std::ffi::c_char,
+) -> i32 {
+    let ret = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<wql_runtime::EvalResult, String> {
+            let prog = unsafe { &(*program).inner };
+            let input_buf = unsafe { safe_slice(input, input_len) }?;
+            let output_buf = unsafe { safe_slice_mut(output, output_len) }?;
+            prog.eval(input_buf, output_buf).map_err(|e| format!("{e}"))
+        },
+    ));
+
+    match ret {
+        Ok(Ok(eval_result)) => {
+            if !result.is_null() {
+                let out = unsafe { &mut *result };
+                out.output_len = eval_result.output_len;
+                out.matched = eval_result.matched;
+            }
+            0
+        }
+        Ok(Err(msg)) => {
+            set_errmsg(errmsg, &msg);
+            -1
+        }
+        Err(_) => {
+            set_errmsg(errmsg, "internal panic during eval");
+            -1
+        }
+    }
+}
+
+/// Run a filter (predicate-only) program on input bytes.
+///
+/// Returns 1 if the record passes, 0 if filtered out, -1 on error.
+#[deprecated(note = "use wql_eval instead")]
 #[no_mangle]
 pub unsafe extern "C" fn wql_filter(
     program: *const wql_program_t,
@@ -265,18 +325,7 @@ pub unsafe extern "C" fn wql_filter(
 /// Run a projection program. Writes projected output into the caller's buffer.
 ///
 /// Returns the number of bytes written to `output`, or -1 on error.
-/// If the output buffer is too small, returns -1 and sets `*errmsg`.
-///
-/// **Buffer sizing:** projection output is always <= `input_len` bytes
-/// (fields are stripped, never added). Passing `output_len >= input_len`
-/// guarantees the buffer is large enough.
-///
-/// # Safety
-///
-/// - `program` must be a valid pointer from `wql_program_load`.
-/// - `input` must point to `input_len` valid bytes.
-/// - `output` must point to `output_len` writable bytes.
-/// - `errmsg`, if non-null, must point to a valid `*mut c_char` location.
+#[deprecated(note = "use wql_eval instead")]
 #[no_mangle]
 pub unsafe extern "C" fn wql_project(
     program: *const wql_program_t,
@@ -310,19 +359,8 @@ pub unsafe extern "C" fn wql_project(
 
 /// Run a combined filter+projection program. Writes output into the caller's buffer.
 ///
-/// Returns:
-/// -  `>= 0`: record passed; value is bytes written to `output`.
-/// -  `-1`: record was filtered out (not an error).
-/// -  `-2`: error; `*errmsg` is set.
-///
-/// **Buffer sizing:** see `wql_project` — `output_len >= input_len` is sufficient.
-///
-/// # Safety
-///
-/// - `program` must be a valid pointer from `wql_program_load`.
-/// - `input` must point to `input_len` valid bytes.
-/// - `output` must point to `output_len` writable bytes.
-/// - `errmsg`, if non-null, must point to a valid `*mut c_char` location.
+/// Returns `>= 0` bytes written (passed), `-1` filtered, `-2` error.
+#[deprecated(note = "use wql_eval instead")]
 #[no_mangle]
 pub unsafe extern "C" fn wql_project_and_filter(
     program: *const wql_program_t,

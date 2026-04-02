@@ -9,12 +9,12 @@
 #include <stdlib.h>
 
 /**
- * Program contains predicate logic — use `wql_filter` or `wql_project_and_filter`.
+ * Program contains predicate logic.
  */
 #define WQL_PROGRAM_FILTER 1
 
 /**
- * Program contains projection logic — use `wql_project` or `wql_project_and_filter`.
+ * Program contains projection logic.
  */
 #define WQL_PROGRAM_PROJECT 2
 
@@ -48,6 +48,20 @@ typedef struct wql_program_info_t {
   uint8_t max_frame_depth;
   uint8_t _reserved[24];
 } wql_program_info_t;
+
+/**
+ * Result of `wql_eval`. Zero-initialize before calling.
+ */
+typedef struct wql_eval_result_t {
+  /**
+   * Bytes written to the output buffer (0 when the program has no projection).
+   */
+  uintptr_t output_len;
+  /**
+   * Whether the record passed the predicate (`true` when no predicate).
+   */
+  bool matched;
+} wql_eval_result_t;
 
 /**
  * Compile a WQL query to bytecode (schema-free mode).
@@ -117,15 +131,36 @@ void wql_program_free(struct wql_program_t *program);
 void wql_program_info(const struct wql_program_t *program, struct wql_program_info_t *out);
 
 /**
- * Run a filter (predicate-only) program on input bytes.
+ * Evaluate a WQL program against input bytes.
  *
- * Returns 1 if the record passes, 0 if filtered out, -1 on error.
+ * Returns 0 on success, -1 on error. On success, `*result` is populated.
+ * On error, `*errmsg` (if non-null) is set.
+ *
+ * For filter-only programs, pass `output = NULL` / `output_len = 0`.
+ * For project-only programs, `result->matched` is always `true`.
+ *
+ * **Buffer sizing:** `output_len >= input_len` is always sufficient.
  *
  * # Safety
  *
  * - `program` must be a valid pointer from `wql_program_load`.
  * - `input` must point to `input_len` valid bytes.
+ * - `output` (if non-null) must point to `output_len` writable bytes.
+ * - `result` must point to a valid `wql_eval_result_t`.
  * - `errmsg`, if non-null, must point to a valid `*mut c_char` location.
+ */
+int32_t wql_eval(const struct wql_program_t *program,
+                 const uint8_t *input,
+                 uintptr_t input_len,
+                 uint8_t *output,
+                 uintptr_t output_len,
+                 struct wql_eval_result_t *result,
+                 char **errmsg);
+
+/**
+ * Run a filter (predicate-only) program on input bytes.
+ *
+ * Returns 1 if the record passes, 0 if filtered out, -1 on error.
  */
 int32_t wql_filter(const struct wql_program_t *program,
                    const uint8_t *input,
@@ -136,18 +171,6 @@ int32_t wql_filter(const struct wql_program_t *program,
  * Run a projection program. Writes projected output into the caller's buffer.
  *
  * Returns the number of bytes written to `output`, or -1 on error.
- * If the output buffer is too small, returns -1 and sets `*errmsg`.
- *
- * **Buffer sizing:** projection output is always <= `input_len` bytes
- * (fields are stripped, never added). Passing `output_len >= input_len`
- * guarantees the buffer is large enough.
- *
- * # Safety
- *
- * - `program` must be a valid pointer from `wql_program_load`.
- * - `input` must point to `input_len` valid bytes.
- * - `output` must point to `output_len` writable bytes.
- * - `errmsg`, if non-null, must point to a valid `*mut c_char` location.
  */
 int64_t wql_project(const struct wql_program_t *program,
                     const uint8_t *input,
@@ -159,19 +182,7 @@ int64_t wql_project(const struct wql_program_t *program,
 /**
  * Run a combined filter+projection program. Writes output into the caller's buffer.
  *
- * Returns:
- * -  `>= 0`: record passed; value is bytes written to `output`.
- * -  `-1`: record was filtered out (not an error).
- * -  `-2`: error; `*errmsg` is set.
- *
- * **Buffer sizing:** see `wql_project` — `output_len >= input_len` is sufficient.
- *
- * # Safety
- *
- * - `program` must be a valid pointer from `wql_program_load`.
- * - `input` must point to `input_len` valid bytes.
- * - `output` must point to `output_len` writable bytes.
- * - `errmsg`, if non-null, must point to a valid `*mut c_char` location.
+ * Returns `>= 0` bytes written (passed), `-1` filtered, `-2` error.
  */
 int64_t wql_project_and_filter(const struct wql_program_t *program,
                                const uint8_t *input,
