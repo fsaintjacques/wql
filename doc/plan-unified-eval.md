@@ -104,6 +104,12 @@ struct, mirroring the Rust `EvalResult`. `errmsg` follows existing convention
   into a single `int64_t` (the current `project_and_filter` uses -1 = filtered,
   -2 = error). Cleaner, no sentinel values.
 
-- Filter-only programs with `max_frame_depth > 0` still allocate an internal
-  scratch buffer (same as today). This is the only allocation on the hot path
-  and only applies to nested-predicate programs when `output` is empty.
+- When the output buffer is too small (or empty), `eval` allocates scratch
+  internally and discards projected output (`output_len = 0`). This means
+  filter-only callers can safely pass `&mut []` without worrying about buffer
+  sizing. The only allocation on the hot path is this scratch buffer.
+
+- Callers that need to distinguish "filter-only pass" from "projection that
+  produced empty output" should check `program.header().has_projection()`.
+  This is a single boolean check — much simpler than the old 3-function
+  dispatch.
