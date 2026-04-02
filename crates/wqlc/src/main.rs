@@ -102,8 +102,6 @@ fn cmd_eval(args: &[String]) -> Result<ExitCode, String> {
     let opts = parse_common_opts(args, true)?;
     let query_str = opts.query.ok_or("missing -q <query>")?;
 
-    let mode = classify_query(&query_str)?;
-
     let json_encoder = if opts.json {
         let schema_bytes = opts
             .schema_bytes
@@ -123,6 +121,7 @@ fn cmd_eval(args: &[String]) -> Result<ExitCode, String> {
         .map_err(|e| format!("compile error: {e}"))?;
     let program = wql_runtime::LoadedProgram::from_bytes(&bytecode)
         .map_err(|e| format!("load error: {e}"))?;
+    let mode = classify_program(&program);
 
     if opts.delimited {
         eval_delimited(&program, mode, json_encoder.as_ref())
@@ -167,13 +166,14 @@ impl JsonEncoder {
     }
 }
 
-fn classify_query(source: &str) -> Result<QueryMode, String> {
-    let ast = wql_compiler::parse(source).map_err(|e| format!("parse error: {e}"))?;
-    Ok(match ast {
-        wql_compiler::ast::Query::Projection(_) => QueryMode::Project,
-        wql_compiler::ast::Query::Predicate(_) => QueryMode::Filter,
-        wql_compiler::ast::Query::Combined { .. } => QueryMode::Combined,
-    })
+fn classify_program(program: &wql_runtime::LoadedProgram) -> QueryMode {
+    let h = program.header();
+    match (h.has_predicate(), h.has_projection()) {
+        (true, true) => QueryMode::Combined,
+        (true, false) => QueryMode::Filter,
+        (false, true) => QueryMode::Project,
+        (false, false) => QueryMode::Project,
+    }
 }
 
 fn eval_single(

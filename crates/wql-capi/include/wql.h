@@ -9,6 +9,16 @@
 #include <stdlib.h>
 
 /**
+ * Program contains predicate logic — use `wql_filter` or `wql_project_and_filter`.
+ */
+#define WQL_PROGRAM_FILTER 1
+
+/**
+ * Program contains projection logic — use `wql_project` or `wql_project_and_filter`.
+ */
+#define WQL_PROGRAM_PROJECT 2
+
+/**
  * Opaque handle to a loaded WQL program.
  */
 typedef struct wql_program_t wql_program_t;
@@ -21,6 +31,23 @@ typedef struct wql_bytes_t {
   uint8_t *data;
   uintptr_t len;
 } wql_bytes_t;
+
+/**
+ * Program metadata returned by `wql_program_info`.
+ *
+ * Zero-initialize before calling `wql_program_info`. New fields will be
+ * appended into `_reserved`; existing fields are stable.
+ */
+typedef struct wql_program_info_t {
+  /**
+   * Bitmask of `WQL_PROGRAM_FILTER` and/or `WQL_PROGRAM_PROJECT`.
+   */
+  uint8_t program_type;
+  uint32_t instruction_count;
+  uint8_t register_count;
+  uint8_t max_frame_depth;
+  uint8_t _reserved[24];
+} wql_program_info_t;
 
 /**
  * Compile a WQL query to bytecode (schema-free mode).
@@ -75,6 +102,19 @@ struct wql_program_t *wql_program_load(const uint8_t *bytecode, uintptr_t len, c
  * `program` must be a pointer returned by `wql_program_load`, or null.
  */
 void wql_program_free(struct wql_program_t *program);
+
+/**
+ * Populate `out` with metadata about a loaded program.
+ *
+ * The caller should zero-initialize `out` before calling. This function
+ * never fails.
+ *
+ * # Safety
+ *
+ * - `program` must be a valid pointer from `wql_program_load`.
+ * - `out` must point to a valid `wql_program_info_t`.
+ */
+void wql_program_info(const struct wql_program_t *program, struct wql_program_info_t *out);
 
 /**
  * Run a filter (predicate-only) program on input bytes.

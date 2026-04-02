@@ -586,20 +586,23 @@ fn compute_max_frame_depth(instructions: &[Instruction]) -> u8 {
     referenced_labels.len().min(255) as u8
 }
 
-fn compute_flags(instructions: &[Instruction]) -> u16 {
-    use crate::types::{FLAG_HAS_PREDICATE, FLAG_HAS_PROJECTION};
-
-    let mut flags = 0u16;
-
+fn compute_regex_flag(instructions: &[Instruction]) -> u16 {
     #[cfg(feature = "regex")]
     {
         for instr in instructions {
             if matches!(instr, Instruction::BytesMatches { .. }) {
-                flags |= FLAG_REGEX_REQUIRED;
-                break;
+                return FLAG_REGEX_REQUIRED;
             }
         }
     }
+    let _ = instructions;
+    0
+}
+
+fn compute_flags(instructions: &[Instruction]) -> u16 {
+    use crate::types::{FLAG_HAS_PREDICATE, FLAG_HAS_PROJECTION};
+
+    let mut flags = compute_regex_flag(instructions);
 
     for instr in instructions {
         match instr {
@@ -642,27 +645,31 @@ fn compute_flags(instructions: &[Instruction]) -> u16 {
     flags
 }
 
-/// Encode a sequence of instructions into a complete WVM program binary.
+/// Encode instructions, inferring all header flags from instruction patterns.
 ///
-/// `register_count`, `max_frame_depth`, and `flags` are computed
-/// automatically by scanning the instruction list.
-///
-/// Target `u32` values in [`DefaultAction::Recurse`] and
-/// [`ArmAction::Frame`] are **label indices** (0-based among
-/// `Instruction::Label` entries). The encoder resolves these to
-/// absolute byte offsets in the bytecode.
-///
-/// # Panics
-///
-/// Panics (in debug builds) if any register index >= 16 or if a label
-/// index references a non-existent label.
+/// Prefer [`encode_with_flags`] when the caller knows the query type from
+/// the AST, since instruction-level heuristics can misclassify edge cases
+/// (e.g. `Frame` used for predicate descent counted as projection).
 #[must_use]
-#[allow(clippy::cast_possible_truncation)] // bytecode << 4 GB
 pub fn encode(instructions: &[Instruction]) -> Vec<u8> {
+    encode_program(instructions, compute_flags(instructions))
+}
+
+/// Encode instructions with caller-supplied semantic flags.
+///
+/// Only `FLAG_REGEX_REQUIRED` is inferred from instructions; the caller
+/// is responsible for providing `FLAG_HAS_PROJECTION` and/or
+/// `FLAG_HAS_PREDICATE` based on the query AST.
+#[must_use]
+pub fn encode_with_flags(instructions: &[Instruction], semantic_flags: u16) -> Vec<u8> {
+    encode_program(instructions, compute_regex_flag(instructions) | semantic_flags)
+}
+
+#[allow(clippy::cast_possible_truncation)] // bytecode << 4 GB
+fn encode_program(instructions: &[Instruction], flags: u16) -> Vec<u8> {
     let label_offsets = resolve_label_offsets(instructions);
     let register_count = compute_register_count(instructions);
     let max_frame_depth = compute_max_frame_depth(instructions);
-    let flags = compute_flags(instructions);
 
     let mut w = Writer::new();
     for instr in instructions {

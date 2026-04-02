@@ -33,6 +33,12 @@ impl LoadedProgram {
         &self.header
     }
 
+    /// Number of decoded instructions in the program.
+    #[must_use]
+    pub fn instruction_count(&self) -> usize {
+        self.instructions.len()
+    }
+
     /// Decode a WVM program from its binary representation.
     ///
     /// # Errors

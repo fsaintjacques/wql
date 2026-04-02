@@ -89,19 +89,15 @@ static uint8_t *read_file(const char *path, size_t *out_len) {
     return buf;
 }
 
-/* ── Classify query mode ──
- *
- * Uses string heuristics since the C API doesn't expose the parsed AST.
- * This is sufficient for the controlled e2e test data; a production C
- * consumer should expose mode from the compiler or bytecode header.
- */
-
 typedef enum { MODE_FILTER, MODE_PROJECT, MODE_COMBINED } query_mode_t;
 
-static query_mode_t classify(const char *query) {
-    if (strstr(query, "WHERE") && strstr(query, "SELECT"))
+static query_mode_t classify_program(const wql_program_t *prog) {
+    struct wql_program_info_t info;
+    memset(&info, 0, sizeof(info));
+    wql_program_info(prog, &info);
+    if ((info.program_type & WQL_PROGRAM_FILTER) && (info.program_type & WQL_PROGRAM_PROJECT))
         return MODE_COMBINED;
-    if (strchr(query, '{'))
+    if (info.program_type & WQL_PROGRAM_PROJECT)
         return MODE_PROJECT;
     return MODE_FILTER;
 }
@@ -297,8 +293,9 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    int rc = delimited ? eval_delimited(prog, classify(query))
-                       : eval_single(prog, classify(query));
+    query_mode_t mode = classify_program(prog);
+    int rc = delimited ? eval_delimited(prog, mode)
+                       : eval_single(prog, mode);
 
     wql_program_free(prog);
     return rc;

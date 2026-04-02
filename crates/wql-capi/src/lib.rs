@@ -30,6 +30,25 @@ pub struct wql_bytes_t {
     pub len: usize,
 }
 
+/// Program contains predicate logic — use `wql_filter` or `wql_project_and_filter`.
+pub const WQL_PROGRAM_FILTER: u8 = 0x01;
+/// Program contains projection logic — use `wql_project` or `wql_project_and_filter`.
+pub const WQL_PROGRAM_PROJECT: u8 = 0x02;
+
+/// Program metadata returned by `wql_program_info`.
+///
+/// Zero-initialize before calling `wql_program_info`. New fields will be
+/// appended into `_reserved`; existing fields are stable.
+#[repr(C)]
+pub struct wql_program_info_t {
+    /// Bitmask of `WQL_PROGRAM_FILTER` and/or `WQL_PROGRAM_PROJECT`.
+    pub program_type: u8,
+    pub instruction_count: u32,
+    pub register_count: u8,
+    pub max_frame_depth: u8,
+    pub _reserved: [u8; 24],
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Compile
 // ═══════════════════════════════════════════════════════════════════════
@@ -165,6 +184,41 @@ pub unsafe extern "C" fn wql_program_free(program: *mut wql_program_t) {
     if !program.is_null() {
         drop(unsafe { Box::from_raw(program) });
     }
+}
+
+/// Populate `out` with metadata about a loaded program.
+///
+/// The caller should zero-initialize `out` before calling. This function
+/// never fails.
+///
+/// # Safety
+///
+/// - `program` must be a valid pointer from `wql_program_load`.
+/// - `out` must point to a valid `wql_program_info_t`.
+#[no_mangle]
+pub unsafe extern "C" fn wql_program_info(
+    program: *const wql_program_t,
+    out: *mut wql_program_info_t,
+) {
+    if program.is_null() || out.is_null() {
+        return;
+    }
+    let prog = unsafe { &(*program).inner };
+    let header = prog.header();
+    let info = unsafe { &mut *out };
+    info.program_type = 0;
+    if header.has_predicate() {
+        info.program_type |= WQL_PROGRAM_FILTER;
+    }
+    if header.has_projection() {
+        info.program_type |= WQL_PROGRAM_PROJECT;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        info.instruction_count = prog.instruction_count() as u32;
+    }
+    info.register_count = header.register_count;
+    info.max_frame_depth = header.max_frame_depth;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
