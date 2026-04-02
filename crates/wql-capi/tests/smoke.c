@@ -211,15 +211,15 @@ static void test_output_buffer_too_small(void) {
     assert(prog != NULL);
     wql_bytes_free(bc);
 
-    /* Provide a buffer that's too small — eval allocates scratch internally,
-       so output_len will be 0 (projected output is discarded). */
+    /* Provide a buffer that's too small — flat projection errors. */
     uint8_t tiny[1];
     struct wql_eval_result_t result;
     memset(&result, 0, sizeof(result));
     int rc = wql_eval(prog, INPUT, INPUT_LEN, tiny, sizeof(tiny), &result, &err);
-    assert(rc == 0);
-    assert(result.output_len == 0);
+    assert(rc == -1 && "expected error for small buffer");
+    assert(err != NULL);
 
+    wql_errmsg_free(err);
     wql_program_free(prog);
     printf("  PASS test_output_buffer_too_small\n");
 }

@@ -99,15 +99,21 @@ impl LoadedProgram {
                 output_len: written,
                 matched: predicate,
             })
-        } else if input.is_empty() {
-            // Empty input — nothing to scan, no buffer needed.
+        } else if depth == 0 {
+            // No frame depth — the VM needs no scratch space.
+            // Filter-only callers pass `&mut []` and hit this zero-allocation path.
+            // Projection programs with undersized buffers will get
+            // OutputBufferTooSmall from the VM's copy_field.
+            let mut empty = [];
+            let mut vm = Vm::new(&self.instructions, &self.label_table, depth);
+            let (predicate, _) = vm.execute(0, input, &mut empty, 0)?;
             Ok(EvalResult {
                 output_len: 0,
-                matched: true,
+                matched: predicate,
             })
         } else {
-            // Output buffer too small (or not provided).
-            // Allocate scratch internally; projected output is discarded.
+            // Output buffer too small (or not provided) and frames need
+            // scratch space. Allocate internally; projected output is discarded.
             let mut scratch = alloc::vec![0u8; required];
             let mut vm = Vm::new(&self.instructions, &self.label_table, depth);
             let (predicate, _) = vm.execute(0, input, &mut scratch, 0)?;

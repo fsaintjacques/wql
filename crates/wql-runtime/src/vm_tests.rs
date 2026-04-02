@@ -158,7 +158,8 @@ fn project_empty_input() {
 }
 
 #[test]
-fn eval_output_too_small_allocates_scratch() {
+fn eval_output_too_small_errors() {
+    // Flat projection (depth=0) with undersized buffer → OutputBufferTooSmall.
     let program = make_program(&[
         Instruction::Dispatch {
             default: DefaultAction::Copy,
@@ -168,11 +169,57 @@ fn eval_output_too_small_allocates_scratch() {
     ]);
 
     let input = encode_varint_field(1, 42);
-    let mut output = [0u8; 1]; // too small — eval allocates scratch internally
-    let result = program.eval(&input, &mut output).unwrap();
-    // Projected output is discarded since buffer was too small.
-    assert_eq!(result.output_len, 0);
+    let mut output = [0u8; 1];
+    let result = program.eval(&input, &mut output);
+    assert_eq!(result, Err(RuntimeError::OutputBufferTooSmall));
+}
+
+#[test]
+fn eval_filter_only_zero_allocation() {
+    // Filter-only with &mut [] should succeed without allocation.
+    let prog = make_filter_program(1, Encoding::Varint, Instruction::CmpGt { reg: 0, imm: 10 });
+    let input = make_person(25, b"Alice", 1);
+
+    let result = prog.eval(&input, &mut []).unwrap();
     assert!(result.matched);
+    assert_eq!(result.output_len, 0);
+}
+
+#[test]
+fn eval_empty_input_with_depth_runs_vm() {
+    // Empty input on a nested-predicate program should run the VM
+    // and return the VM's predicate (true for empty input, no predicates pushed).
+    let prog = make_program(&[
+        Instruction::Dispatch {
+            default: DefaultAction::Skip,
+            arms: vec![DispatchArm {
+                match_: ArmMatch::Field(4),
+                actions: vec![ArmAction::Frame(0)],
+            }],
+        },
+        Instruction::CmpLenEq {
+            reg: 0,
+            bytes: b"NYC".to_vec(),
+        },
+        Instruction::Return,
+        Instruction::Label,
+        Instruction::Dispatch {
+            default: DefaultAction::Skip,
+            arms: vec![DispatchArm {
+                match_: ArmMatch::Field(1),
+                actions: vec![ArmAction::Decode {
+                    reg: 0,
+                    encoding: Encoding::Len,
+                }],
+            }],
+        },
+        Instruction::Return,
+    ]);
+
+    // Empty input with undersized buffer — should NOT short-circuit to true.
+    // The VM runs, no fields match, CmpLenEq sees unset register → false.
+    let result = prog.eval(&[], &mut []).unwrap();
+    assert!(!result.matched);
 }
 
 // ── Nested projection tests (FRAME / RECURSE) ──
