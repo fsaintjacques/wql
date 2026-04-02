@@ -18,6 +18,15 @@ pub use error::RuntimeError;
 use vm::Vm;
 use wql_ir::{Instruction, ProgramHeader};
 
+/// Result of evaluating a WQL program against an input record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvalResult {
+    /// Bytes written to the output buffer (0 when the program has no projection).
+    pub output_len: usize,
+    /// Whether the record passed the predicate (`true` when the program has no predicate).
+    pub matched: bool,
+}
+
 /// A decoded, ready-to-execute WVM program.
 pub struct LoadedProgram {
     header: ProgramHeader,
@@ -59,85 +68,88 @@ impl LoadedProgram {
             label_table,
         })
     }
+
+    /// Evaluate this program against `input`.
+    ///
+    /// The program header determines what happens:
+    /// - **Filter-only**: `output` is unused; pass `&mut []`.
+    /// - **Project-only**: `matched` is always `true`.
+    /// - **Filter+project**: both fields populated.
+    ///
+    /// # Buffer sizing
+    ///
+    /// When the program has projection, `output` must be at least
+    /// `input.len() + 5 * max_frame_depth` bytes.  For filter-only programs
+    /// an empty slice is sufficient; an internal buffer is allocated when
+    /// `max_frame_depth > 0`.
+    ///
+    /// # Errors
+    /// Returns `RuntimeError::OutputBufferTooSmall` if `output` is too small
+    /// for a program with projection, or `RuntimeError::MalformedInput` if
+    /// the input is not valid protobuf.
+    pub fn eval(&self, input: &[u8], output: &mut [u8]) -> Result<EvalResult, RuntimeError> {
+        let depth = self.header.max_frame_depth;
+        let required = input.len() + 5 * usize::from(depth);
+
+        if output.len() >= required {
+            // Output buffer is large enough — use it directly.
+            let mut vm = Vm::new(&self.instructions, &self.label_table, depth);
+            let (predicate, written) = vm.execute(0, input, output, 0)?;
+            Ok(EvalResult {
+                output_len: written,
+                matched: predicate,
+            })
+        } else if depth == 0 {
+            // No frame depth, no projection buffer needed.
+            let mut empty = [];
+            let mut vm = Vm::new(&self.instructions, &self.label_table, depth);
+            let (predicate, _) = vm.execute(0, input, &mut empty, 0)?;
+            Ok(EvalResult {
+                output_len: 0,
+                matched: predicate,
+            })
+        } else {
+            // Output buffer too small but frames need scratch space.
+            // Allocate internally; projected output (if any) is discarded.
+            let mut scratch = alloc::vec![0u8; required];
+            let mut vm = Vm::new(&self.instructions, &self.label_table, depth);
+            let (predicate, _) = vm.execute(0, input, &mut scratch, 0)?;
+            Ok(EvalResult {
+                output_len: 0,
+                matched: predicate,
+            })
+        }
+    }
 }
 
 /// Project `input` through `program`, writing selected fields to `output`.
-///
-/// Returns the number of bytes written to `output`.
-/// `output` must be at least `input.len() + 5 * max_frame_depth` bytes to
-/// accommodate the temporary gap used when rewriting length prefixes in
-/// nested sub-messages.
-///
-/// # Errors
-/// Returns `RuntimeError::OutputBufferTooSmall` if `output` is too small,
-/// or `RuntimeError::MalformedInput` if the input is not valid protobuf.
+#[deprecated(note = "use LoadedProgram::eval() instead")]
 pub fn project(
     program: &LoadedProgram,
     input: &[u8],
     output: &mut [u8],
 ) -> Result<usize, RuntimeError> {
-    let required = input.len() + 5 * usize::from(program.header.max_frame_depth);
-    if output.len() < required {
-        return Err(RuntimeError::OutputBufferTooSmall);
-    }
-    let mut vm = Vm::new(
-        &program.instructions,
-        &program.label_table,
-        program.header.max_frame_depth,
-    );
-    let (_, written) = vm.execute(0, input, output, 0)?;
-    Ok(written)
+    program.eval(input, output).map(|r| r.output_len)
 }
 
 /// Run a filter-only `program` against `input`, returning whether it matches.
-///
-/// Programs with FRAME (nested predicates) still need an output buffer for
-/// the length-prefix rewrite during recursion. The buffer is allocated
-/// internally when needed.
-///
-/// # Errors
-/// Returns `RuntimeError::MalformedInput` if the input is not valid protobuf,
-/// or `RuntimeError::StackUnderflow` if the program's bool stack is malformed.
+#[deprecated(note = "use LoadedProgram::eval() instead")]
 pub fn filter(program: &LoadedProgram, input: &[u8]) -> Result<bool, RuntimeError> {
-    let mut vm = Vm::new(
-        &program.instructions,
-        &program.label_table,
-        program.header.max_frame_depth,
-    );
-    if program.header.max_frame_depth == 0 {
-        let mut output = [];
-        let (predicate, _) = vm.execute(0, input, &mut output, 0)?;
-        Ok(predicate)
-    } else {
-        let required = input.len() + 5 * usize::from(program.header.max_frame_depth);
-        let mut output = alloc::vec![0u8; required];
-        let (predicate, _) = vm.execute(0, input, &mut output, 0)?;
-        Ok(predicate)
-    }
+    program.eval(input, &mut []).map(|r| r.matched)
 }
 
 /// Project and filter `input` through `program`.
-///
-/// Returns `Some(bytes_written)` if the predicate is true, `None` if false.
-/// `output` must be at least `input.len() + 5 * max_frame_depth` bytes.
-///
-/// # Errors
-/// Returns `RuntimeError::OutputBufferTooSmall` if `output` is too small,
-/// or `RuntimeError::MalformedInput` if the input is not valid protobuf.
+#[deprecated(note = "use LoadedProgram::eval() instead")]
 pub fn project_and_filter(
     program: &LoadedProgram,
     input: &[u8],
     output: &mut [u8],
 ) -> Result<Option<usize>, RuntimeError> {
-    let required = input.len() + 5 * usize::from(program.header.max_frame_depth);
-    if output.len() < required {
-        return Err(RuntimeError::OutputBufferTooSmall);
-    }
-    let mut vm = Vm::new(
-        &program.instructions,
-        &program.label_table,
-        program.header.max_frame_depth,
-    );
-    let (predicate, written) = vm.execute(0, input, output, 0)?;
-    Ok(if predicate { Some(written) } else { None })
+    program.eval(input, output).map(|r| {
+        if r.matched {
+            Some(r.output_len)
+        } else {
+            None
+        }
+    })
 }
