@@ -713,6 +713,18 @@ fn expand_deep_exclusions(
         })
         .collect::<Result<Vec<_>, CompileError>>()?;
 
+    // Validate that each target name exists somewhere in the schema tree.
+    let msg_type_name = msg.name.as_deref().unwrap_or("");
+    for (name, field_ref) in target_names.iter().zip(deep_exclusions.iter()) {
+        let mut visited = std::collections::HashSet::new();
+        if !msg_contains_field_deep(msg, &[name.clone()], fds, &mut visited) {
+            return Err(CompileError::UnresolvedField {
+                field: name.clone(),
+                span: field_ref.span(),
+            });
+        }
+    }
+
     // Add top-level exclusions for fields that exist at the current level.
     for name in &target_names {
         if let Some(fd) = find_field_by_name(msg, name) {
@@ -749,23 +761,36 @@ fn expand_deep_exclusions(
         };
 
         // Check if any deep exclusion target exists transitively in this sub-message.
-        if !msg_contains_field_deep(nested_msg, &target_names, fds) {
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(msg_type_name.to_string());
+        if !msg_contains_field_deep(nested_msg, &target_names, fds, &mut visited) {
             continue;
         }
 
         if existing_nested.contains(&field_num) {
             // Merge deep exclusions into the existing Nested item's sub-projection.
+            let mut visited = std::collections::HashSet::new();
+            visited.insert(msg_type_name.to_string());
             for item in &mut items {
                 if let BoundProjectionItem::Nested { field, projection } = item {
                     if field.field_num == field_num {
-                        merge_deep_exclusions_into(projection, &target_names, nested_msg, fds);
+                        merge_deep_exclusions_into(
+                            projection,
+                            &target_names,
+                            nested_msg,
+                            fds,
+                            &mut visited,
+                        );
                         break;
                     }
                 }
             }
         } else {
             // Create a new Nested item with a Copy sub-projection.
-            let sub_proj = build_deep_exclusion_projection(nested_msg, &target_names, fds);
+            let mut visited = std::collections::HashSet::new();
+            visited.insert(msg_type_name.to_string());
+            let sub_proj =
+                build_deep_exclusion_projection(nested_msg, &target_names, fds, &mut visited);
             items.push(BoundProjectionItem::Nested {
                 field: BoundField {
                     field_num,
@@ -780,24 +805,35 @@ fn expand_deep_exclusions(
 }
 
 /// Check if a message (or any of its sub-messages) contains a field with
-/// one of the given names.
+/// one of the given names. Uses `visited` to break cycles on
+/// self-referential or mutually-recursive message types.
 fn msg_contains_field_deep(
     msg: &DescriptorProto,
     names: &[String],
     fds: &FileDescriptorSet,
+    visited: &mut std::collections::HashSet<String>,
 ) -> bool {
+    // Check direct fields of this message.
     for fd in &msg.field {
         if let Some(ref name) = fd.name {
             if names.iter().any(|n| n == name) {
                 return true;
             }
         }
-        if fd.r#type() == ProtoType::Message {
-            let type_name = fd.type_name.as_deref().unwrap_or("");
-            if let Some(nested_msg) = resolve_type_name(fds, type_name) {
-                if msg_contains_field_deep(nested_msg, names, fds) {
-                    return true;
-                }
+    }
+    // Recurse into sub-message fields.
+    for fd in &msg.field {
+        if fd.r#type() != ProtoType::Message {
+            continue;
+        }
+        let type_name = fd.type_name.as_deref().unwrap_or("");
+        let short_name = type_name.strip_prefix('.').unwrap_or(type_name);
+        if !visited.insert(short_name.to_string()) {
+            continue; // already visited — break cycle
+        }
+        if let Some(nested_msg) = resolve_type_name(fds, type_name) {
+            if msg_contains_field_deep(nested_msg, names, fds, visited) {
+                return true;
             }
         }
     }
@@ -810,6 +846,7 @@ fn build_deep_exclusion_projection(
     msg: &DescriptorProto,
     target_names: &[String],
     fds: &FileDescriptorSet,
+    visited: &mut std::collections::HashSet<String>,
 ) -> BoundProjection {
     let mut exclusions = Vec::new();
     let mut items = Vec::new();
@@ -831,16 +868,24 @@ fn build_deep_exclusion_projection(
             continue;
         }
         let type_name = fd.type_name.as_deref().unwrap_or("");
+        let short_name = type_name.strip_prefix('.').unwrap_or(type_name);
+        if visited.contains(short_name) {
+            continue; // already visited — break cycle
+        }
         let nested_msg = match resolve_type_name(fds, type_name) {
             Some(m) => m,
             None => continue,
         };
-        if !msg_contains_field_deep(nested_msg, target_names, fds) {
+        let mut child_visited = visited.clone();
+        child_visited.insert(short_name.to_string());
+        if !msg_contains_field_deep(nested_msg, target_names, fds, &mut child_visited.clone()) {
             continue;
         }
         #[allow(clippy::cast_sign_loss)]
         let field_num = fd.number.unwrap_or(0) as u32;
-        let sub_proj = build_deep_exclusion_projection(nested_msg, target_names, fds);
+        visited.insert(short_name.to_string());
+        let sub_proj =
+            build_deep_exclusion_projection(nested_msg, target_names, fds, visited);
         items.push(BoundProjectionItem::Nested {
             field: BoundField {
                 field_num,
@@ -862,6 +907,7 @@ fn merge_deep_exclusions_into(
     target_names: &[String],
     msg: &DescriptorProto,
     fds: &FileDescriptorSet,
+    visited: &mut std::collections::HashSet<String>,
 ) {
     match &mut proj.kind {
         BoundProjectionKind::Copy {
@@ -896,14 +942,24 @@ fn merge_deep_exclusions_into(
                 #[allow(clippy::cast_sign_loss)]
                 let field_num = fd.number.unwrap_or(0) as u32;
                 let type_name = fd.type_name.as_deref().unwrap_or("");
+                let short_name = type_name.strip_prefix('.').unwrap_or(type_name);
+                if visited.contains(short_name) {
+                    continue; // break cycle
+                }
                 let nested_msg = match resolve_type_name(fds, type_name) {
                     Some(m) => m,
                     None => continue,
                 };
-                if !msg_contains_field_deep(nested_msg, target_names, fds) {
+                if !msg_contains_field_deep(
+                    nested_msg,
+                    target_names,
+                    fds,
+                    &mut visited.clone(),
+                ) {
                     continue;
                 }
 
+                visited.insert(short_name.to_string());
                 if existing_nested.contains(&field_num) {
                     // Merge into existing Nested item.
                     for item in items.iter_mut() {
@@ -914,6 +970,7 @@ fn merge_deep_exclusions_into(
                                     target_names,
                                     nested_msg,
                                     fds,
+                                    visited,
                                 );
                                 break;
                             }
@@ -921,7 +978,7 @@ fn merge_deep_exclusions_into(
                     }
                 } else {
                     let sub_proj =
-                        build_deep_exclusion_projection(nested_msg, target_names, fds);
+                        build_deep_exclusion_projection(nested_msg, target_names, fds, visited);
                     new_nested.push(BoundProjectionItem::Nested {
                         field: BoundField {
                             field_num,
@@ -941,12 +998,19 @@ fn merge_deep_exclusions_into(
                     if let Some(fd) = fd {
                         if fd.r#type() == ProtoType::Message {
                             let type_name = fd.type_name.as_deref().unwrap_or("");
+                            let short_name =
+                                type_name.strip_prefix('.').unwrap_or(type_name);
+                            if visited.contains(short_name) {
+                                continue;
+                            }
+                            visited.insert(short_name.to_string());
                             if let Some(nested_msg) = resolve_type_name(fds, type_name) {
                                 merge_deep_exclusions_into(
                                     projection,
                                     target_names,
                                     nested_msg,
                                     fds,
+                                    visited,
                                 );
                             }
                         }
@@ -1763,5 +1827,77 @@ mod tests {
         assert!(inner_items
             .iter()
             .any(|item| matches!(item, BoundProjectionItem::Field(f) if f.field_num == 1)));
+    }
+
+    /// Build a self-referential schema:
+    /// Tree { name: string=1, child: Tree=2 }
+    fn recursive_schema() -> Vec<u8> {
+        let tree_msg = DescriptorProto {
+            name: Some("Tree".to_string()),
+            field: vec![
+                make_field("name", 1, ProtoType::String, None),
+                make_field("child", 2, ProtoType::Message, Some(".test.Tree")),
+            ],
+            ..Default::default()
+        };
+        let fds = FileDescriptorSet {
+            file: vec![FileDescriptorProto {
+                name: Some("test.proto".to_string()),
+                package: Some("test".to_string()),
+                message_type: vec![tree_msg],
+                ..Default::default()
+            }],
+        };
+        prost::Message::encode_to_vec(&fds)
+    }
+
+    #[test]
+    fn bind_deep_exclusion_self_referential_no_infinite_recursion() {
+        let schema = recursive_schema();
+        let opts = CompileOptions {
+            schema: Some(&schema),
+            root_message: Some("test.Tree"),
+        };
+        // This would stack-overflow without cycle detection.
+        let q = parse("{ ..-name, .. }").unwrap();
+        let bound = bind_with_schema(&q, &opts).unwrap();
+        let BoundQuery::Projection(proj) = &bound else {
+            panic!("expected Projection");
+        };
+        let BoundProjectionKind::Copy { exclusions, items } = &proj.kind else {
+            panic!("expected Copy");
+        };
+        // name (field 1) excluded at top level.
+        assert!(exclusions.contains(&1));
+        // child (field 2) should have a Nested Frame that also excludes name.
+        let nested = items
+            .iter()
+            .find_map(|item| match item {
+                BoundProjectionItem::Nested { field, projection } if field.field_num == 2 => {
+                    Some(projection)
+                }
+                _ => None,
+            })
+            .expect("should have Nested item for child");
+        let BoundProjectionKind::Copy {
+            exclusions: child_excl,
+            ..
+        } = &nested.kind
+        else {
+            panic!("expected Copy for child projection");
+        };
+        assert!(child_excl.contains(&1), "child.name should be excluded");
+    }
+
+    #[test]
+    fn bind_deep_exclusion_unresolved_field_error() {
+        // "..-typo" should error when the field doesn't exist anywhere.
+        let schema = deep_excl_schema();
+        let q = parse("{ ..-typo, .. }").unwrap();
+        let err = bind_with_schema(&q, &deep_excl_opts(&schema)).unwrap_err();
+        assert!(
+            matches!(err, CompileError::UnresolvedField { .. }),
+            "expected UnresolvedField, got {err:?}"
+        );
     }
 }
