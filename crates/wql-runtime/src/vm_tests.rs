@@ -158,7 +158,7 @@ fn project_empty_input() {
 }
 
 #[test]
-fn project_output_too_small() {
+fn eval_output_too_small_allocates_scratch() {
     let program = make_program(&[
         Instruction::Dispatch {
             default: DefaultAction::Copy,
@@ -168,9 +168,11 @@ fn project_output_too_small() {
     ]);
 
     let input = encode_varint_field(1, 42);
-    let mut output = [0u8; 1]; // too small
-    let result = project(&program, &input, &mut output);
-    assert_eq!(result, Err(RuntimeError::OutputBufferTooSmall));
+    let mut output = [0u8; 1]; // too small — eval allocates scratch internally
+    let result = program.eval(&input, &mut output).unwrap();
+    // Projected output is discarded since buffer was too small.
+    assert_eq!(result.output_len, 0);
+    assert!(result.matched);
 }
 
 // ── Nested projection tests (FRAME / RECURSE) ──

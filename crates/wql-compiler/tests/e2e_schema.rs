@@ -42,9 +42,10 @@ fn project(wql: &str, opts: &CompileOptions, input: &impl Message) -> Vec<u8> {
     let program = wql_runtime::LoadedProgram::from_bytes(&bytecode).expect("load failed");
     let input_bytes = input.encode_to_vec();
     let mut output = vec![0u8; input_bytes.len() * 2 + 256];
-    let len = wql_runtime::project(&program, &input_bytes, &mut output)
-        .unwrap_or_else(|e| panic!("project({wql:?}) failed: {e:?}"));
-    output.truncate(len);
+    let result = program
+        .eval(&input_bytes, &mut output)
+        .unwrap_or_else(|e| panic!("eval({wql:?}) failed: {e:?}"));
+    output.truncate(result.output_len);
     output
 }
 
@@ -52,8 +53,10 @@ fn filter(wql: &str, opts: &CompileOptions, input: &impl Message) -> bool {
     let bytecode = compile(wql, opts).expect("compile failed");
     let program = wql_runtime::LoadedProgram::from_bytes(&bytecode).expect("load failed");
     let input_bytes = input.encode_to_vec();
-    wql_runtime::filter(&program, &input_bytes)
-        .unwrap_or_else(|e| panic!("filter({wql:?}) failed: {e:?}"))
+    program
+        .eval(&input_bytes, &mut [])
+        .unwrap_or_else(|e| panic!("eval({wql:?}) failed: {e:?}"))
+        .matched
 }
 
 fn project_and_filter(wql: &str, opts: &CompileOptions, input: &impl Message) -> Option<Vec<u8>> {
@@ -61,12 +64,15 @@ fn project_and_filter(wql: &str, opts: &CompileOptions, input: &impl Message) ->
     let program = wql_runtime::LoadedProgram::from_bytes(&bytecode).expect("load failed");
     let input_bytes = input.encode_to_vec();
     let mut output = vec![0u8; input_bytes.len() * 2 + 256];
-    let result = wql_runtime::project_and_filter(&program, &input_bytes, &mut output)
-        .unwrap_or_else(|e| panic!("project_and_filter({wql:?}) failed: {e:?}"));
-    result.map(|len| {
-        output.truncate(len);
-        output
-    })
+    let result = program
+        .eval(&input_bytes, &mut output)
+        .unwrap_or_else(|e| panic!("eval({wql:?}) failed: {e:?}"));
+    if result.matched {
+        output.truncate(result.output_len);
+        Some(output)
+    } else {
+        None
+    }
 }
 
 /// Decode the output back to a Person.

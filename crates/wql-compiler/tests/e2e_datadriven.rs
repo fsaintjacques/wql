@@ -294,12 +294,12 @@ fn run_filter(
     expected: &str,
     _line: usize,
 ) -> Result<(), String> {
-    let result = wql_runtime::filter(program, input).map_err(|e| format!("filter error: {e}"))?;
+    let result = program.eval(input, &mut []).map_err(|e| format!("eval error: {e}"))?;
     let expected_bool: bool = expected
         .parse()
         .map_err(|_| format!("bad expected: {expected}"))?;
-    if result != expected_bool {
-        return Err(format!("got {result}, expected {expected_bool}"));
+    if result.matched != expected_bool {
+        return Err(format!("got {}, expected {expected_bool}", result.matched));
     }
     Ok(())
 }
@@ -312,17 +312,18 @@ fn run_project(
     _line: usize,
 ) -> Result<(), String> {
     let mut output = vec![0u8; input.len() * 2 + 256];
-    let len = wql_runtime::project(program, input, &mut output)
-        .map_err(|e| format!("project error: {e}"))?;
+    let result = program
+        .eval(input, &mut output)
+        .map_err(|e| format!("eval error: {e}"))?;
 
     let expected: Value =
         serde_json::from_str(expected_json).map_err(|e| format!("bad expected JSON: {e}"))?;
     let expected = normalize(&expected);
 
-    let actual = if len == 0 {
+    let actual = if result.output_len == 0 {
         normalize(&serde_json::json!({}))
     } else {
-        normalize(&proto_to_json(desc, &output[..len]))
+        normalize(&proto_to_json(desc, &output[..result.output_len]))
     };
 
     if actual != expected {
@@ -340,19 +341,22 @@ fn run_combined(
     _line: usize,
 ) -> Result<(), String> {
     let mut output = vec![0u8; input.len() * 2 + 256];
-    let result = wql_runtime::project_and_filter(program, input, &mut output)
-        .map_err(|e| format!("project_and_filter error: {e}"))?;
+    let result = program
+        .eval(input, &mut output)
+        .map_err(|e| format!("eval error: {e}"))?;
 
     if expected == "<none>" {
-        if result.is_some() {
+        if result.matched {
             return Err("expected <none>, got output".into());
         }
     } else {
-        let len = result.ok_or("expected output, got <none>")?;
+        if !result.matched {
+            return Err("expected output, got <none>".into());
+        }
         let expected_val: Value =
             serde_json::from_str(expected).map_err(|e| format!("bad expected JSON: {e}"))?;
         let expected_val = normalize(&expected_val);
-        let actual = normalize(&proto_to_json(desc, &output[..len]));
+        let actual = normalize(&proto_to_json(desc, &output[..result.output_len]));
         if actual != expected_val {
             return Err(format!("expected {expected_val}, got {actual}"));
         }

@@ -1542,8 +1542,8 @@ mod tests {
         input.extend(build_proto_varint(3, 99));
 
         let mut output = vec![0u8; 256];
-        let len = wql_runtime::project(&program, &input, &mut output).unwrap();
-        let output = &output[..len];
+        let result = program.eval(&input, &mut output).unwrap();
+        let output = &output[..result.output_len];
 
         // Output should have fields 1 and 2, but not 3
         assert!(output.len() < input.len());
@@ -1568,8 +1568,8 @@ mod tests {
         input.extend(build_proto_len(3, &inner));
 
         let mut output = vec![0u8; 256];
-        let len = wql_runtime::project(&program, &input, &mut output).unwrap();
-        let output = &output[..len];
+        let result = program.eval(&input, &mut output).unwrap();
+        let output = &output[..result.output_len];
 
         // Output should contain field 1 (Alice) and field 3 with only city (NYC)
         assert!(!output.is_empty());
@@ -1583,8 +1583,7 @@ mod tests {
         let mut input = Vec::new();
         input.extend(build_proto_varint(2, 25));
 
-        let result = wql_runtime::filter(&program, &input).unwrap();
-        assert!(result);
+        assert!(program.eval(&input, &mut []).unwrap().matched);
     }
 
     #[test]
@@ -1595,8 +1594,7 @@ mod tests {
         let mut input = Vec::new();
         input.extend(build_proto_varint(2, 10));
 
-        let result = wql_runtime::filter(&program, &input).unwrap();
-        assert!(!result);
+        assert!(!program.eval(&input, &mut []).unwrap().matched);
     }
 
     #[test]
@@ -1609,8 +1607,8 @@ mod tests {
         input.extend(build_proto_varint(2, 25));
 
         let mut output = vec![0u8; 256];
-        let result = wql_runtime::project_and_filter(&program, &input, &mut output).unwrap();
-        assert!(result.is_some());
+        let result = program.eval(&input, &mut output).unwrap();
+        assert!(result.matched);
     }
 
     #[test]
@@ -1624,8 +1622,8 @@ mod tests {
         input.extend(build_proto_varint(3, 77));
 
         let mut output = vec![0u8; 256];
-        let len = wql_runtime::project(&program, &input, &mut output).unwrap();
-        let output = &output[..len];
+        let result = program.eval(&input, &mut output).unwrap();
+        let output = &output[..result.output_len];
 
         // Field 3 tag = (3 << 3) | 0 = 24, should not be in output
         assert!(!output.contains(&24));

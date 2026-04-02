@@ -99,18 +99,15 @@ impl LoadedProgram {
                 output_len: written,
                 matched: predicate,
             })
-        } else if depth == 0 {
-            // No frame depth, no projection buffer needed.
-            let mut empty = [];
-            let mut vm = Vm::new(&self.instructions, &self.label_table, depth);
-            let (predicate, _) = vm.execute(0, input, &mut empty, 0)?;
+        } else if input.is_empty() {
+            // Empty input — nothing to scan, no buffer needed.
             Ok(EvalResult {
                 output_len: 0,
-                matched: predicate,
+                matched: true,
             })
         } else {
-            // Output buffer too small but frames need scratch space.
-            // Allocate internally; projected output (if any) is discarded.
+            // Output buffer too small (or not provided).
+            // Allocate scratch internally; projected output is discarded.
             let mut scratch = alloc::vec![0u8; required];
             let mut vm = Vm::new(&self.instructions, &self.label_table, depth);
             let (predicate, _) = vm.execute(0, input, &mut scratch, 0)?;

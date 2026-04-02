@@ -71,27 +71,32 @@ fn load_program(source: &str) -> wql_runtime::LoadedProgram {
     wql_runtime::LoadedProgram::from_bytes(&bytecode).unwrap()
 }
 
-/// Run project() and return the output bytes.
+/// Run eval() for a projection and return the output bytes.
 fn run_project(source: &str, input: &[u8]) -> Vec<u8> {
     let program = load_program(source);
     let mut output = vec![0u8; input.len() * 2 + 256];
-    let len = wql_runtime::project(&program, input, &mut output)
-        .unwrap_or_else(|e| panic!("project({source:?}) failed: {e:?}"));
-    output[..len].to_vec()
+    let result = program
+        .eval(input, &mut output)
+        .unwrap_or_else(|e| panic!("eval({source:?}) failed: {e:?}"));
+    output[..result.output_len].to_vec()
 }
 
-/// Run filter() and return the boolean result.
+/// Run eval() for a filter and return the boolean result.
 fn run_filter(source: &str, input: &[u8]) -> bool {
     let program = load_program(source);
-    wql_runtime::filter(&program, input).unwrap()
+    program.eval(input, &mut []).unwrap().matched
 }
 
-/// Run project_and_filter() and return Option<output_bytes>.
+/// Run eval() for a combined filter+project and return Option<output_bytes>.
 fn run_project_and_filter(source: &str, input: &[u8]) -> Option<Vec<u8>> {
     let program = load_program(source);
     let mut output = vec![0u8; input.len() * 2 + 256];
-    let result = wql_runtime::project_and_filter(&program, input, &mut output).unwrap();
-    result.map(|len| output[..len].to_vec())
+    let result = program.eval(input, &mut output).unwrap();
+    if result.matched {
+        Some(output[..result.output_len].to_vec())
+    } else {
+        None
+    }
 }
 
 /// Check that a protobuf field is present in the output.
@@ -874,8 +879,8 @@ mod schema_bound {
             proto_varint(4, 0),
         ]);
         let mut output = vec![0u8; 256];
-        let len = wql_runtime::project(&program, &input, &mut output).unwrap();
-        let output = &output[..len];
+        let result = program.eval(&input, &mut output).unwrap();
+        let output = &output[..result.output_len];
 
         assert!(has_field(output, 1));
         assert!(has_field(output, 2));
@@ -891,8 +896,8 @@ mod schema_bound {
         let inner = build_message(&[proto_len(1, b"NYC"), proto_varint(2, 10001)]);
         let input = build_message(&[proto_len(1, b"Alice"), proto_len(3, &inner)]);
         let mut output = vec![0u8; 256];
-        let len = wql_runtime::project(&program, &input, &mut output).unwrap();
-        let output = &output[..len];
+        let result = program.eval(&input, &mut output).unwrap();
+        let output = &output[..result.output_len];
 
         assert!(has_field(output, 1));
         assert!(has_field(output, 3));
@@ -908,10 +913,10 @@ mod schema_bound {
         let program = wql_runtime::LoadedProgram::from_bytes(&bytecode).unwrap();
 
         let input = build_message(&[proto_varint(2, 25)]);
-        assert!(wql_runtime::filter(&program, &input).unwrap());
+        assert!(program.eval(&input, &mut []).unwrap().matched);
 
         let input2 = build_message(&[proto_varint(2, 10)]);
-        assert!(!wql_runtime::filter(&program, &input2).unwrap());
+        assert!(!program.eval(&input2, &mut []).unwrap().matched);
     }
 
     #[test]
@@ -921,10 +926,10 @@ mod schema_bound {
         let program = wql_runtime::LoadedProgram::from_bytes(&bytecode).unwrap();
 
         let input = build_message(&[proto_len(1, b"Alice")]);
-        assert!(wql_runtime::filter(&program, &input).unwrap());
+        assert!(program.eval(&input, &mut []).unwrap().matched);
 
         let input2 = build_message(&[proto_len(1, b"Bob")]);
-        assert!(!wql_runtime::filter(&program, &input2).unwrap());
+        assert!(!program.eval(&input2, &mut []).unwrap().matched);
     }
 
     #[test]
@@ -935,7 +940,7 @@ mod schema_bound {
 
         let inner = build_message(&[proto_len(1, b"NYC")]);
         let input = build_message(&[proto_len(3, &inner)]);
-        assert!(wql_runtime::filter(&program, &input).unwrap());
+        assert!(program.eval(&input, &mut []).unwrap().matched);
     }
 
     #[test]
@@ -965,9 +970,9 @@ mod schema_bound {
         ]);
 
         let mut output = vec![0u8; 256];
-        let result = wql_runtime::project_and_filter(&program, &input, &mut output).unwrap();
-        assert!(result.is_some());
-        let output = &output[..result.unwrap()];
+        let result = program.eval(&input, &mut output).unwrap();
+        assert!(result.matched);
+        let output = &output[..result.output_len];
         assert!(has_field(output, 1));
         assert!(!has_field(output, 2));
     }

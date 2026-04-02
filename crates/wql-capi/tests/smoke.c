@@ -58,17 +58,20 @@ static void test_project(void) {
     assert(prog != NULL);
     wql_bytes_free(bc);
 
-    /* Project into caller-owned buffer */
+    /* Eval into caller-owned buffer */
     uint8_t output[256];
-    int64_t n = wql_project(prog, INPUT, INPUT_LEN, output, sizeof(output), &err);
-    assert(n >= 0 && "project failed");
+    struct wql_eval_result_t result;
+    memset(&result, 0, sizeof(result));
+    int rc = wql_eval(prog, INPUT, INPUT_LEN, output, sizeof(output), &result, &err);
+    assert(rc == 0 && "eval failed");
     assert(err == NULL);
+    assert(result.matched);
 
     /* Output should have field 1 (tag 0x08) and field 2 (tag 0x12) */
-    assert(has_tag(output, (size_t)n, 0x08));
-    assert(has_tag(output, (size_t)n, 0x12));
+    assert(has_tag(output, result.output_len, 0x08));
+    assert(has_tag(output, result.output_len, 0x12));
     /* Field 3 (tag 0x18) should be stripped */
-    assert(!has_tag(output, (size_t)n, 0x18));
+    assert(!has_tag(output, result.output_len, 0x18));
 
     wql_program_free(prog);
     printf("  PASS test_project\n");
@@ -85,8 +88,11 @@ static void test_filter_pass(void) {
     wql_bytes_free(bc);
 
     /* field 1 = 42, should pass #1 > 10 */
-    int result = wql_filter(prog, INPUT, INPUT_LEN, &err);
-    assert(result == 1);
+    struct wql_eval_result_t result;
+    memset(&result, 0, sizeof(result));
+    int rc = wql_eval(prog, INPUT, INPUT_LEN, NULL, 0, &result, &err);
+    assert(rc == 0);
+    assert(result.matched);
     assert(err == NULL);
 
     wql_program_free(prog);
@@ -104,8 +110,11 @@ static void test_filter_fail(void) {
     wql_bytes_free(bc);
 
     /* field 1 = 42, should fail #1 > 100 */
-    int result = wql_filter(prog, INPUT, INPUT_LEN, &err);
-    assert(result == 0);
+    struct wql_eval_result_t result;
+    memset(&result, 0, sizeof(result));
+    int rc = wql_eval(prog, INPUT, INPUT_LEN, NULL, 0, &result, &err);
+    assert(rc == 0);
+    assert(!result.matched);
     assert(err == NULL);
 
     wql_program_free(prog);
@@ -123,14 +132,17 @@ static void test_project_and_filter_pass(void) {
     wql_bytes_free(bc);
 
     uint8_t output[256];
-    int64_t n = wql_project_and_filter(prog, INPUT, INPUT_LEN, output, sizeof(output), &err);
-    assert(n >= 0 && "expected pass");
+    struct wql_eval_result_t result;
+    memset(&result, 0, sizeof(result));
+    int rc = wql_eval(prog, INPUT, INPUT_LEN, output, sizeof(output), &result, &err);
+    assert(rc == 0 && "expected success");
+    assert(result.matched);
     assert(err == NULL);
 
     /* Output should have field 2 only */
-    assert(has_tag(output, (size_t)n, 0x12));
-    assert(!has_tag(output, (size_t)n, 0x08));
-    assert(!has_tag(output, (size_t)n, 0x18));
+    assert(has_tag(output, result.output_len, 0x12));
+    assert(!has_tag(output, result.output_len, 0x08));
+    assert(!has_tag(output, result.output_len, 0x18));
 
     wql_program_free(prog);
     printf("  PASS test_project_and_filter_pass\n");
@@ -147,8 +159,11 @@ static void test_project_and_filter_reject(void) {
     wql_bytes_free(bc);
 
     uint8_t output[256];
-    int64_t n = wql_project_and_filter(prog, INPUT, INPUT_LEN, output, sizeof(output), &err);
-    assert(n == -1 && "expected filtered out");
+    struct wql_eval_result_t result;
+    memset(&result, 0, sizeof(result));
+    int rc = wql_eval(prog, INPUT, INPUT_LEN, output, sizeof(output), &result, &err);
+    assert(rc == 0);
+    assert(!result.matched && "expected filtered out");
     assert(err == NULL);
 
     wql_program_free(prog);
@@ -164,8 +179,10 @@ static void test_null_errmsg(void) {
     assert(prog != NULL);
     wql_bytes_free(bc);
 
-    int result = wql_filter(prog, INPUT, INPUT_LEN, NULL);
-    assert(result == 1 || result == 0);
+    struct wql_eval_result_t result;
+    memset(&result, 0, sizeof(result));
+    int rc = wql_eval(prog, INPUT, INPUT_LEN, NULL, 0, &result, NULL);
+    assert(rc == 0);
 
     wql_program_free(prog);
 
@@ -194,13 +211,15 @@ static void test_output_buffer_too_small(void) {
     assert(prog != NULL);
     wql_bytes_free(bc);
 
-    /* Provide a buffer that's too small */
+    /* Provide a buffer that's too small — eval allocates scratch internally,
+       so output_len will be 0 (projected output is discarded). */
     uint8_t tiny[1];
-    int64_t n = wql_project(prog, INPUT, INPUT_LEN, tiny, sizeof(tiny), &err);
-    assert(n == -1 && "expected error for small buffer");
-    assert(err != NULL);
+    struct wql_eval_result_t result;
+    memset(&result, 0, sizeof(result));
+    int rc = wql_eval(prog, INPUT, INPUT_LEN, tiny, sizeof(tiny), &result, &err);
+    assert(rc == 0);
+    assert(result.output_len == 0);
 
-    wql_errmsg_free(err);
     wql_program_free(prog);
     printf("  PASS test_output_buffer_too_small\n");
 }

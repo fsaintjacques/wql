@@ -121,20 +121,12 @@ fn cmd_eval(args: &[String]) -> Result<ExitCode, String> {
         .map_err(|e| format!("compile error: {e}"))?;
     let program = wql_runtime::LoadedProgram::from_bytes(&bytecode)
         .map_err(|e| format!("load error: {e}"))?;
-    let mode = classify_program(&program);
 
     if opts.delimited {
-        eval_delimited(&program, mode, json_encoder.as_ref())
+        eval_delimited(&program, json_encoder.as_ref())
     } else {
-        eval_single(&program, mode, json_encoder.as_ref())
+        eval_single(&program, json_encoder.as_ref())
     }
-}
-
-#[derive(Clone, Copy)]
-enum QueryMode {
-    Filter,
-    Project,
-    Combined,
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -166,55 +158,30 @@ impl JsonEncoder {
     }
 }
 
-fn classify_program(program: &wql_runtime::LoadedProgram) -> QueryMode {
-    let h = program.header();
-    match (h.has_predicate(), h.has_projection()) {
-        (true, true) => QueryMode::Combined,
-        (true, false) => QueryMode::Filter,
-        (false, true) => QueryMode::Project,
-        (false, false) => QueryMode::Project,
-    }
-}
-
 fn eval_single(
     program: &wql_runtime::LoadedProgram,
-    mode: QueryMode,
     json: Option<&JsonEncoder>,
 ) -> Result<ExitCode, String> {
     let input = read_stdin()?;
-    let mut stdout = io::stdout().lock();
+    let has_projection = program.header().has_projection();
+    let mut output = vec![0u8; input.len() * 2 + 256];
 
-    match mode {
-        QueryMode::Combined => {
-            let mut output = vec![0u8; input.len() * 2 + 256];
-            let result = wql_runtime::project_and_filter(program, &input, &mut output)
-                .map_err(|e| format!("runtime error: {e}"))?;
-            match result {
-                Some(len) => {
-                    write_output(&mut stdout, &output[..len], json)?;
-                    Ok(ExitCode::SUCCESS)
-                }
-                None => Ok(ExitCode::FAILURE),
-            }
-        }
-        QueryMode::Filter => {
-            let result =
-                wql_runtime::filter(program, &input).map_err(|e| format!("runtime error: {e}"))?;
-            if result {
-                write_output(&mut stdout, &input, json)?;
-                Ok(ExitCode::SUCCESS)
-            } else {
-                Ok(ExitCode::FAILURE)
-            }
-        }
-        QueryMode::Project => {
-            let mut output = vec![0u8; input.len() * 2 + 256];
-            let len = wql_runtime::project(program, &input, &mut output)
-                .map_err(|e| format!("runtime error: {e}"))?;
-            write_output(&mut stdout, &output[..len], json)?;
-            Ok(ExitCode::SUCCESS)
-        }
+    let result = program
+        .eval(&input, &mut output)
+        .map_err(|e| format!("runtime error: {e}"))?;
+
+    if !result.matched {
+        return Ok(ExitCode::FAILURE);
     }
+
+    let mut stdout = io::stdout().lock();
+    let out_bytes = if has_projection {
+        &output[..result.output_len]
+    } else {
+        &input
+    };
+    write_output(&mut stdout, out_bytes, json)?;
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Write a record in streaming mode: JSON line or delimited proto.
@@ -247,9 +214,9 @@ fn write_output(
 
 fn eval_delimited(
     program: &wql_runtime::LoadedProgram,
-    mode: QueryMode,
     json: Option<&JsonEncoder>,
 ) -> Result<ExitCode, String> {
+    let has_projection = program.header().has_projection();
     let mut stdin = io::BufReader::new(io::stdin().lock());
     let mut stdout = io::BufWriter::new(io::stdout().lock());
     let mut record_buf = Vec::new();
@@ -264,44 +231,32 @@ fn eval_delimited(
             Err(e) => return Err(format!("record {i}: read varint: {e}")),
         };
 
-        // Read exactly rec_len bytes
         record_buf.resize(rec_len, 0);
         stdin
             .read_exact(&mut record_buf)
             .map_err(|e| format!("record {i}: read: {e}"))?;
 
-        // Ensure output buffer is large enough (only needed for project/combined)
-        if !matches!(mode, QueryMode::Filter) {
-            let out_cap = rec_len
-                .checked_mul(2)
-                .and_then(|n| n.checked_add(256))
-                .ok_or_else(|| format!("record {i}: too large"))?;
-            if output_buf.len() < out_cap {
-                output_buf.resize(out_cap, 0);
-            }
+        let out_cap = rec_len
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(256))
+            .ok_or_else(|| format!("record {i}: too large"))?;
+        if output_buf.len() < out_cap {
+            output_buf.resize(out_cap, 0);
         }
 
-        match mode {
-            QueryMode::Project => {
-                let len = wql_runtime::project(program, &record_buf, &mut output_buf)
-                    .map_err(|e| format!("record {i}: project error: {e}"))?;
-                write_stream_output(&mut stdout, &output_buf[..len], json)?;
-            }
-            QueryMode::Filter => {
-                let pass = wql_runtime::filter(program, &record_buf)
-                    .map_err(|e| format!("record {i}: filter error: {e}"))?;
-                if pass {
-                    write_stream_output(&mut stdout, &record_buf, json)?;
-                }
-            }
-            QueryMode::Combined => {
-                let result = wql_runtime::project_and_filter(program, &record_buf, &mut output_buf)
-                    .map_err(|e| format!("record {i}: runtime error: {e}"))?;
-                if let Some(len) = result {
-                    write_stream_output(&mut stdout, &output_buf[..len], json)?;
-                }
-            }
+        let result = program
+            .eval(&record_buf, &mut output_buf)
+            .map_err(|e| format!("record {i}: eval error: {e}"))?;
+
+        if result.matched {
+            let out_bytes = if has_projection {
+                &output_buf[..result.output_len]
+            } else {
+                &record_buf
+            };
+            write_stream_output(&mut stdout, out_bytes, json)?;
         }
+
         i += 1;
     }
 
