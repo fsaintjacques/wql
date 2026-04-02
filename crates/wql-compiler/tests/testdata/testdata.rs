@@ -92,3 +92,23 @@ impl Status {
         }
     }
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Team {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(int64, tag = "2")]
+    pub id: i64,
+    #[prost(message, repeated, tag = "3")]
+    pub members: ::prost::alloc::vec::Vec<Member>,
+    #[prost(string, tag = "4")]
+    pub secret: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Member {
+    #[prost(string, tag = "1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub role: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub secret: ::prost::alloc::string::String,
+}

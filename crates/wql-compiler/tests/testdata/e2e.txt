@@ -460,3 +460,19 @@ age > 0
 {}
 ----
 false
+
+# ── Deep exclusion (..-field) ──
+
+# message: testdata.Team
+
+{ ..-secret, .. }
+{"name": "Eng", "id": 1, "members": [{"name": "Alice", "role": "Lead", "secret": "tok"}], "secret": "key"}
+----
+{"name": "Eng", "id": 1, "members": [{"name": "Alice", "role": "Lead"}]}
+
+# message: testdata.Team
+
+{ -name, ..-secret, .. }
+{"name": "Eng", "id": 1, "secret": "key", "members": [{"name": "Alice", "secret": "tok"}]}
+----
+{"id": 1, "members": [{"name": "Alice"}]}

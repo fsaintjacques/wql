@@ -546,3 +546,108 @@ fn error_missing_root_message() {
     let result = compile("{ name }", &opts);
     assert!(result.is_err());
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Deep exclusion (..-field) tests
+// ═══════════════════════════════════════════════════════════════════════
+
+fn opts_team() -> CompileOptions<'static> {
+    CompileOptions {
+        schema: Some(DESCRIPTOR),
+        root_message: Some("testdata.Team"),
+    }
+}
+
+fn team() -> testdata::Team {
+    testdata::Team {
+        name: "Engineering".into(),
+        id: 42,
+        members: vec![
+            testdata::Member {
+                name: "Alice".into(),
+                role: "Lead".into(),
+                secret: "alice-token".into(),
+            },
+            testdata::Member {
+                name: "Bob".into(),
+                role: "Dev".into(),
+                secret: "bob-token".into(),
+            },
+        ],
+        secret: "team-api-key".into(),
+    }
+}
+
+fn decode_team(output: &[u8]) -> testdata::Team {
+    testdata::Team::decode(output).expect("failed to decode Team from output")
+}
+
+#[test]
+fn deep_exclusion_removes_secret_at_all_levels() {
+    let t = team();
+    let output = project("{ ..-secret, .. }", &opts_team(), &t);
+    let result = decode_team(&output);
+    // Top-level secret should be stripped.
+    assert_eq!(result.secret, "");
+    // Nested member secrets should be stripped.
+    assert_eq!(result.members.len(), 2);
+    assert_eq!(result.members[0].secret, "");
+    assert_eq!(result.members[1].secret, "");
+    // Other fields preserved.
+    assert_eq!(result.name, "Engineering");
+    assert_eq!(result.id, 42);
+    assert_eq!(result.members[0].name, "Alice");
+    assert_eq!(result.members[0].role, "Lead");
+    assert_eq!(result.members[1].name, "Bob");
+}
+
+#[test]
+fn deep_exclusion_field_only_at_top_level() {
+    // "id" only exists in Team, not in Member — no Nested Frame generated.
+    let t = team();
+    let output = project("{ ..-id, .. }", &opts_team(), &t);
+    let result = decode_team(&output);
+    assert_eq!(result.id, 0); // stripped
+    assert_eq!(result.name, "Engineering"); // preserved
+    assert_eq!(result.secret, "team-api-key"); // preserved
+    assert_eq!(result.members.len(), 2); // preserved
+}
+
+#[test]
+fn deep_exclusion_combined_with_predicate() {
+    let t = team();
+    let result = project_and_filter(
+        "WHERE id > 0 SELECT { ..-secret, .. }",
+        &opts_team(),
+        &t,
+    );
+    let output = result.expect("predicate should match");
+    let decoded = decode_team(&output);
+    assert_eq!(decoded.secret, "");
+    assert_eq!(decoded.members[0].secret, "");
+    assert_eq!(decoded.name, "Engineering");
+}
+
+#[test]
+fn deep_exclusion_combined_with_shallow_exclusion() {
+    let t = team();
+    // Remove "secret" at all levels AND "name" at top level only.
+    let output = project("{ -name, ..-secret, .. }", &opts_team(), &t);
+    let result = decode_team(&output);
+    assert_eq!(result.name, ""); // shallow exclusion
+    assert_eq!(result.secret, ""); // deep exclusion
+    assert_eq!(result.members[0].name, "Alice"); // name NOT excluded in members
+    assert_eq!(result.members[0].secret, ""); // deep exclusion
+}
+
+#[test]
+fn deep_exclusion_with_explicit_nested_projection() {
+    let t = team();
+    // User writes an explicit Nested for members; deep exclusion should merge.
+    let output = project("{ members { name, .. }, ..-secret, .. }", &opts_team(), &t);
+    let result = decode_team(&output);
+    assert_eq!(result.secret, ""); // top-level secret stripped
+    assert_eq!(result.members[0].name, "Alice"); // explicitly included
+    assert_eq!(result.members[0].role, "Lead"); // copy mode preserves
+    assert_eq!(result.members[0].secret, ""); // deep exclusion merged in
+}

@@ -48,3 +48,16 @@ message Discount {
   string code   = 1;
   int32  percent = 2;
 }
+
+message Team {
+  string name      = 1;
+  int64  id        = 2;
+  repeated Member members = 3;
+  string secret    = 4;
+}
+
+message Member {
+  string name   = 1;
+  string role   = 2;
+  string secret = 3;
+}
