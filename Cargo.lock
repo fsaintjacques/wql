@@ -141,6 +141,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "dlmalloc"
+version = "0.2.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9f5b01c17f85ee988d832c40e549a64bd89ab2c9f8d8a613bdf5122ae507e294"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -764,6 +775,15 @@ name = "wql-runtime"
 version = "0.1.0"
 dependencies = [
  "wql-ir",
+]
+
+[[package]]
+name = "wql-wasm"
+version = "0.1.0"
+dependencies = [
+ "dlmalloc",
+ "wql-ir",
+ "wql-runtime",
 ]
 
 [[package]]

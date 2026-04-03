@@ -1,0 +1,18 @@
+[package]
+name    = "wql-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wql-ir      = { workspace = true }
+wql-runtime = { workspace = true }
+dlmalloc    = { version = "0.2", features = ["global"] }
+
+[features]
+regex = ["wql-runtime/regex", "wql-ir/regex"]
+
+[lints]
+workspace = true
