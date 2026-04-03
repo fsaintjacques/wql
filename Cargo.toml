@@ -8,6 +8,13 @@ members = [
     "crates/wqlc",
     "crates/wql-wasm",
 ]
+default-members = [
+    "crates/wql-ir",
+    "crates/wql-runtime",
+    "crates/wql-compiler",
+    "crates/wql-capi",
+    "crates/wqlc",
+]
 
 [workspace.dependencies]
 wql-ir       = { path = "crates/wql-ir" }

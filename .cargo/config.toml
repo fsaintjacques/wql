@@ -1,3 +1,6 @@
-# Convenience alias: `cargo wasm` builds the wql-wasm crate for wasm32
+# Rebuilds the WASM template embedded in wqlc.
+# Run this after changing wql-runtime or wql-ir, then copy the output:
+#   cargo wasm-template
+#   cp target/wasm32-unknown-unknown/release-wasm/wql_wasm.wasm crates/wqlc/data/template.wasm
 [alias]
-wasm = "build -p wql-wasm --target wasm32-unknown-unknown --profile release-wasm"
+wasm-template = "build -p wql-wasm --target wasm32-unknown-unknown --profile release-wasm"

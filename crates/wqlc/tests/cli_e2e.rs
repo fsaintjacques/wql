@@ -231,6 +231,16 @@ use std::io::Write;
 
 #[test]
 fn cli_eval_delimited_e2e() {
+    run_e2e(&[]);
+}
+
+#[test]
+#[cfg(feature = "wasm")]
+fn cli_eval_delimited_e2e_wasm() {
+    run_e2e(&["--wasm"]);
+}
+
+fn run_e2e(extra_args: &[&str]) {
     let cases = parse_test_file(E2E_DATA);
     let pool = descriptor_pool();
     let wqlc = wqlc_bin();
@@ -254,18 +264,21 @@ fn cli_eval_delimited_e2e() {
             .collect();
         let stream = encode_delimited_stream(&input_records);
 
-        // Run wqlc eval --delimited
+        // Run wqlc eval --delimited [extra_args]
+        let mut args = vec![
+            "eval",
+            "-q",
+            &case.query,
+            "-s",
+            schema_str,
+            "-m",
+            &case.message,
+            "--delimited",
+        ];
+        args.extend_from_slice(extra_args);
+
         let output = Command::new(&wqlc)
-            .args([
-                "eval",
-                "-q",
-                &case.query,
-                "-s",
-                schema_str,
-                "-m",
-                &case.message,
-                "--delimited",
-            ])
+            .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -422,5 +435,10 @@ fn cli_eval_delimited_e2e() {
         );
     }
 
-    eprintln!("{passed} CLI e2e records passed");
+    let label = if extra_args.is_empty() {
+        "native"
+    } else {
+        "wasm"
+    };
+    eprintln!("{passed} CLI e2e records passed ({label})");
 }

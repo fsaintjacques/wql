@@ -2,6 +2,9 @@ use prost_reflect::{DynamicMessage, MessageDescriptor};
 use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
+#[cfg(feature = "wasm")]
+mod wasm_eval;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
@@ -13,6 +16,7 @@ fn main() -> ExitCode {
         "compile" => cmd_compile(&args[2..]),
         "eval" => cmd_eval(&args[2..]),
         "inspect" => cmd_inspect(&args[2..]),
+        "wasm" => cmd_wasm(&args[2..]),
         "help" | "--help" | "-h" => return usage(),
         other => {
             eprintln!("wqlc: unknown command '{other}'");
@@ -38,6 +42,7 @@ Commands:
   compile   Compile a WQL query to bytecode
   eval      Compile and execute a WQL query
   inspect   Disassemble a compiled WQL program
+  wasm      Package a compiled program into a WASM module
 
 Options (compile, eval):
   -q <query>       WQL query string (required)
@@ -119,6 +124,26 @@ fn cmd_eval(args: &[String]) -> Result<ExitCode, String> {
     let compile_opts = build_compile_opts(opts.schema_bytes.as_deref(), opts.message.as_deref());
     let bytecode = wql_compiler::compile(&query_str, &compile_opts)
         .map_err(|e| format!("compile error: {e}"))?;
+
+    #[cfg(feature = "wasm")]
+    if opts.wasm {
+        let mut wasm_prog = wasm_eval::WasmProgram::new(&bytecode)?;
+        let has_projection = wql_runtime::LoadedProgram::from_bytes(&bytecode)
+            .map_err(|e| format!("load error: {e}"))?
+            .header()
+            .has_projection();
+        return if opts.delimited {
+            eval_delimited_wasm(&mut wasm_prog, has_projection, json_encoder.as_ref())
+        } else {
+            eval_single_wasm(&mut wasm_prog, has_projection, json_encoder.as_ref())
+        };
+    }
+
+    #[cfg(not(feature = "wasm"))]
+    if opts.wasm {
+        return Err("--wasm requires building with: cargo build --features wasm".into());
+    }
+
     let program = wql_runtime::LoadedProgram::from_bytes(&bytecode)
         .map_err(|e| format!("load error: {e}"))?;
 
@@ -251,6 +276,73 @@ fn eval_delimited(
         if result.matched {
             let out_bytes = if has_projection {
                 &output_buf[..result.output_len]
+            } else {
+                &record_buf
+            };
+            write_stream_output(&mut stdout, out_bytes, json)?;
+        }
+
+        i += 1;
+    }
+
+    stdout.flush().map_err(|e| format!("flush: {e}"))?;
+    Ok(ExitCode::SUCCESS)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// WASM eval paths
+// ═══════════════════════════════════════════════════════════════════════
+
+#[cfg(feature = "wasm")]
+fn eval_single_wasm(
+    wasm: &mut wasm_eval::WasmProgram,
+    has_projection: bool,
+    json: Option<&JsonEncoder>,
+) -> Result<ExitCode, String> {
+    let input = read_stdin()?;
+    let (result, output) = wasm.eval(&input)?;
+
+    if !result.matched {
+        return Ok(ExitCode::FAILURE);
+    }
+
+    let mut stdout = io::stdout().lock();
+    let out_bytes = if has_projection { &output } else { &input };
+    write_output(&mut stdout, out_bytes, json)?;
+    Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(feature = "wasm")]
+fn eval_delimited_wasm(
+    wasm: &mut wasm_eval::WasmProgram,
+    has_projection: bool,
+    json: Option<&JsonEncoder>,
+) -> Result<ExitCode, String> {
+    let mut stdin = io::BufReader::new(io::stdin().lock());
+    let mut stdout = io::BufWriter::new(io::stdout().lock());
+    let mut record_buf = Vec::new();
+    let mut i = 0usize;
+
+    loop {
+        let rec_len = match read_varint_from(&mut stdin) {
+            #[allow(clippy::cast_possible_truncation)]
+            Ok(n) => n as usize,
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(format!("record {i}: read varint: {e}")),
+        };
+
+        record_buf.resize(rec_len, 0);
+        stdin
+            .read_exact(&mut record_buf)
+            .map_err(|e| format!("record {i}: read: {e}"))?;
+
+        let (result, output) = wasm
+            .eval(&record_buf)
+            .map_err(|e| format!("record {i}: {e}"))?;
+
+        if result.matched {
+            let out_bytes = if has_projection {
+                &output
             } else {
                 &record_buf
             };
@@ -435,6 +527,83 @@ fn format_action(a: &wql_ir::ArmAction) -> String {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// wasm
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Pre-built WASM template containing the WVM runtime with a placeholder
+/// program slot. The slot starts with a 16-byte sentinel (`WQLSLOT!` x2)
+/// followed by a program area that we overwrite with the real bytecode.
+const WASM_TEMPLATE: &[u8] = include_bytes!("../data/template.wasm");
+const WASM_SENTINEL: &[u8; 16] = b"WQLSLOT!WQLSLOT!";
+const WASM_SLOT_SIZE: usize = 8192;
+const WASM_PROGRAM_OFFSET: usize = 16; // program area starts after sentinel
+
+fn cmd_wasm(args: &[String]) -> Result<ExitCode, String> {
+    let (input_path, output_path) = parse_wasm_args(args)?;
+
+    let program = std::fs::read(&input_path).map_err(|e| format!("read {input_path}: {e}"))?;
+
+    let max_program = WASM_SLOT_SIZE - WASM_PROGRAM_OFFSET;
+    if program.len() > max_program {
+        return Err(format!(
+            "program is {} bytes; maximum is {max_program}",
+            program.len()
+        ));
+    }
+
+    // Validate it's a real WQL program before embedding.
+    wql_runtime::LoadedProgram::from_bytes(&program)
+        .map_err(|e| format!("invalid program: {e}"))?;
+
+    let slot_pos = find_sentinel(WASM_TEMPLATE)
+        .ok_or("sentinel not found in WASM template (template may be corrupt)")?;
+
+    let mut wasm = WASM_TEMPLATE.to_vec();
+    let program_start = slot_pos + WASM_PROGRAM_OFFSET;
+
+    // Zero the program area, then write the real program.
+    wasm[program_start..slot_pos + WASM_SLOT_SIZE].fill(0);
+    wasm[program_start..program_start + program.len()].copy_from_slice(&program);
+
+    std::fs::write(&output_path, &wasm).map_err(|e| format!("write {output_path}: {e}"))?;
+    eprintln!(
+        "wrote {} bytes to {output_path} (program: {} bytes)",
+        wasm.len(),
+        program.len()
+    );
+
+    Ok(ExitCode::SUCCESS)
+}
+
+fn find_sentinel(data: &[u8]) -> Option<usize> {
+    data.windows(WASM_SENTINEL.len())
+        .position(|w| w == WASM_SENTINEL)
+}
+
+fn parse_wasm_args(args: &[String]) -> Result<(String, String), String> {
+    if args.is_empty() {
+        return Err("usage: wqlc wasm <program.wqlbc> -o <output.wasm>".into());
+    }
+
+    let input = args[0].clone();
+    let mut output = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" => {
+                i += 1;
+                output = Some(args.get(i).ok_or("missing value for -o")?.clone());
+            }
+            other => return Err(format!("unknown option '{other}'")),
+        }
+        i += 1;
+    }
+
+    let output = output.ok_or("missing -o <output.wasm>")?;
+    Ok((input, output))
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Argument parsing
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -445,6 +614,7 @@ struct Opts {
     output: Option<String>,
     delimited: bool,
     json: bool,
+    wasm: bool,
 }
 
 fn parse_common_opts(args: &[String], allow_delimited: bool) -> Result<Opts, String> {
@@ -454,6 +624,7 @@ fn parse_common_opts(args: &[String], allow_delimited: bool) -> Result<Opts, Str
     let mut output = None;
     let mut delimited = false;
     let mut json = false;
+    let mut wasm = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -486,6 +657,12 @@ fn parse_common_opts(args: &[String], allow_delimited: bool) -> Result<Opts, Str
                 }
                 json = true;
             }
+            "--wasm" => {
+                if !allow_delimited {
+                    return Err("--wasm is only supported with 'eval'".into());
+                }
+                wasm = true;
+            }
             other => return Err(format!("unknown option '{other}'")),
         }
         i += 1;
@@ -502,6 +679,7 @@ fn parse_common_opts(args: &[String], allow_delimited: bool) -> Result<Opts, Str
         output,
         delimited,
         json,
+        wasm,
     })
 }
 

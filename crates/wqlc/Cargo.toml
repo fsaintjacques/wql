@@ -7,12 +7,16 @@ edition = "2021"
 name = "wqlc"
 path = "src/main.rs"
 
+[features]
+wasm = ["dep:wasmtime"]
+
 [dependencies]
 wql-compiler  = { workspace = true }
 wql-runtime   = { workspace = true }
 wql-ir        = { workspace = true }
 prost-reflect = { version = "0.14", features = ["serde"] }
 serde_json    = "1"
+wasmtime      = { version = "32", optional = true, default-features = false, features = ["cranelift", "runtime"] }
 
 [dev-dependencies]
 prost         = "0.13"
