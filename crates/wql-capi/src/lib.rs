@@ -310,7 +310,8 @@ pub unsafe extern "C" fn wql_eval(
 #[no_mangle]
 pub unsafe extern "C" fn wql_bytes_free(bytes: wql_bytes_t) {
     if !bytes.data.is_null() {
-        drop(unsafe { Vec::from_raw_parts(bytes.data, bytes.len, bytes.len) });
+        let slice = unsafe { core::slice::from_raw_parts_mut(bytes.data, bytes.len) };
+        drop::<Box<[u8]>>(Box::from(slice));
     }
 }
 

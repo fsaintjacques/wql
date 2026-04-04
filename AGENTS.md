@@ -3,10 +3,14 @@
 ## Build & Test
 
 ```bash
-make check              # format + clippy + all tests — the merge gate
+make check              # fmt --check + clippy + tests — the CI/merge gate
+make format             # auto-fix formatting
+make lint               # auto-fix clippy warnings (--fix --allow-dirty)
 cargo test -p <crate>   # test a single crate
 cargo test -- <name>    # run a single test by name
 ```
+
+CI runs `make check` on every PR and push to `main` (see `.github/workflows/ci.yml`).
 
 Regenerate test proto schema after editing `proto/testdata.proto`:
 
