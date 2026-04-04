@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 #[cfg(feature = "wasm")]
 mod wasm_eval;
+mod wasm_template;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -341,11 +342,7 @@ fn eval_delimited_wasm(
             .map_err(|e| format!("record {i}: {e}"))?;
 
         if result.matched {
-            let out_bytes = if has_projection {
-                &output
-            } else {
-                &record_buf
-            };
+            let out_bytes = if has_projection { &output } else { &record_buf };
             write_stream_output(&mut stdout, out_bytes, json)?;
         }
 
@@ -530,40 +527,16 @@ fn format_action(a: &wql_ir::ArmAction) -> String {
 // wasm
 // ═══════════════════════════════════════════════════════════════════════
 
-/// Pre-built WASM template containing the WVM runtime with a placeholder
-/// program slot. The slot starts with a 16-byte sentinel (`WQLSLOT!` x2)
-/// followed by a program area that we overwrite with the real bytecode.
-const WASM_TEMPLATE: &[u8] = include_bytes!("../data/template.wasm");
-const WASM_SENTINEL: &[u8; 16] = b"WQLSLOT!WQLSLOT!";
-const WASM_SLOT_SIZE: usize = 8192;
-const WASM_PROGRAM_OFFSET: usize = 16; // program area starts after sentinel
-
 fn cmd_wasm(args: &[String]) -> Result<ExitCode, String> {
     let (input_path, output_path) = parse_wasm_args(args)?;
 
     let program = std::fs::read(&input_path).map_err(|e| format!("read {input_path}: {e}"))?;
 
-    let max_program = WASM_SLOT_SIZE - WASM_PROGRAM_OFFSET;
-    if program.len() > max_program {
-        return Err(format!(
-            "program is {} bytes; maximum is {max_program}",
-            program.len()
-        ));
-    }
-
     // Validate it's a real WQL program before embedding.
     wql_runtime::LoadedProgram::from_bytes(&program)
         .map_err(|e| format!("invalid program: {e}"))?;
 
-    let slot_pos = find_sentinel(WASM_TEMPLATE)
-        .ok_or("sentinel not found in WASM template (template may be corrupt)")?;
-
-    let mut wasm = WASM_TEMPLATE.to_vec();
-    let program_start = slot_pos + WASM_PROGRAM_OFFSET;
-
-    // Zero the program area, then write the real program.
-    wasm[program_start..slot_pos + WASM_SLOT_SIZE].fill(0);
-    wasm[program_start..program_start + program.len()].copy_from_slice(&program);
+    let wasm = wasm_template::patch(&program)?;
 
     std::fs::write(&output_path, &wasm).map_err(|e| format!("write {output_path}: {e}"))?;
     eprintln!(
@@ -573,11 +546,6 @@ fn cmd_wasm(args: &[String]) -> Result<ExitCode, String> {
     );
 
     Ok(ExitCode::SUCCESS)
-}
-
-fn find_sentinel(data: &[u8]) -> Option<usize> {
-    data.windows(WASM_SENTINEL.len())
-        .position(|w| w == WASM_SENTINEL)
 }
 
 fn parse_wasm_args(args: &[String]) -> Result<(String, String), String> {

@@ -30,7 +30,7 @@ fn main() {
     slot[program_offset + 7] = 0; // max_frame_depth
     slot[program_offset + 8..program_offset + 10].copy_from_slice(&0u16.to_le_bytes()); // flags
     slot[program_offset + 10..program_offset + 14].copy_from_slice(&1u32.to_le_bytes()); // bytecode_len=1
-    // Bytecode: single RETURN instruction
+                                                                                         // Bytecode: single RETURN instruction
     slot[program_offset + 14] = 0x15; // OP_RETURN
 
     fs::write(&dst, slot).unwrap();

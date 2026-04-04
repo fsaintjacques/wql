@@ -8,7 +8,9 @@ compile_error!(
 );
 
 #[cfg(target_feature = "atomics")]
-compile_error!("wql-wasm requires single-threaded WASM; the atomics target feature is not supported");
+compile_error!(
+    "wql-wasm requires single-threaded WASM; the atomics target feature is not supported"
+);
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {

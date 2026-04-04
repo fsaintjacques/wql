@@ -1,11 +1,7 @@
 //! Execute a WQL program through a WASM module via wasmtime.
 
+use crate::wasm_template;
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
-
-const WASM_TEMPLATE: &[u8] = include_bytes!("../data/template.wasm");
-const WASM_SENTINEL: &[u8; 16] = b"WQLSLOT!WQLSLOT!";
-const WASM_SLOT_SIZE: usize = 8192;
-const WASM_PROGRAM_OFFSET: usize = 16;
 
 /// A WQL program loaded into a WASM instance, ready to evaluate messages.
 pub struct WasmProgram {
@@ -23,7 +19,7 @@ pub struct WasmEvalResult {
 impl WasmProgram {
     /// Compile WQL bytecode into a patched WASM module and instantiate it.
     pub fn new(bytecode: &[u8]) -> Result<Self, String> {
-        let wasm_bytes = patch_template(bytecode)?;
+        let wasm_bytes = wasm_template::patch(bytecode)?;
 
         let engine = Engine::default();
         let module = Module::new(&engine, &wasm_bytes).map_err(|e| format!("wasm load: {e}"))?;
@@ -103,28 +99,6 @@ impl WasmProgram {
 
         Ok((WasmEvalResult { matched: true }, output))
     }
-}
-
-fn patch_template(bytecode: &[u8]) -> Result<Vec<u8>, String> {
-    let max_program = WASM_SLOT_SIZE - WASM_PROGRAM_OFFSET;
-    if bytecode.len() > max_program {
-        return Err(format!(
-            "program is {} bytes; maximum is {max_program}",
-            bytecode.len()
-        ));
-    }
-
-    let slot_pos = WASM_TEMPLATE
-        .windows(WASM_SENTINEL.len())
-        .position(|w| w == WASM_SENTINEL)
-        .ok_or("sentinel not found in WASM template")?;
-
-    let mut wasm = WASM_TEMPLATE.to_vec();
-    let program_start = slot_pos + WASM_PROGRAM_OFFSET;
-    wasm[program_start..slot_pos + WASM_SLOT_SIZE].fill(0);
-    wasm[program_start..program_start + bytecode.len()].copy_from_slice(bytecode);
-
-    Ok(wasm)
 }
 
 #[cfg(test)]
