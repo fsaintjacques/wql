@@ -357,6 +357,49 @@ int main(void) {
 }
 ```
 
+## WASM
+
+WQL programs can be packaged as standalone WASM modules for broker-side deployment (Redpanda data transforms, WasmEdge) or any WASM host. The module bundles the WVM interpreter and a single sealed program — no compilation at runtime, no external dependencies.
+
+### Packaging
+
+```bash
+# 1. Compile a query to bytecode
+wqlc compile -q 'WHERE age > 18 SELECT { name, email }' \
+  -s schema.bin -m pkg.Person -o transform.wqlbc
+
+# 2. Package into a standalone WASM module
+wqlc wasm transform.wqlbc -o transform.wasm
+```
+
+The output is a self-contained `.wasm` file (~27 KB) that exports a single function:
+
+```
+wql_eval(in_ptr: i32, in_len: i32, out_ptr: i32, out_len: i32) -> i64
+```
+
+Returns `>= 0` (matched, value is output bytes written), `-1` (not matched), or `-2` (error). The host provides both input and output buffers in WASM linear memory.
+
+### Testing with wasmtime
+
+Build `wqlc` with the `wasm` feature to test the full pipeline (compile, package, execute) via wasmtime:
+
+```bash
+cargo install --path crates/wqlc --features wasm
+
+# Runs through the WASM path instead of native
+wqlc eval -q '{ name, age }' -s schema.bin -m pkg.Person --wasm < message.bin
+```
+
+### Rebuilding the template
+
+The WASM template (`crates/wqlc/data/template.wasm`) is checked into the repo. Rebuild it after changing `wql-runtime` or `wql-ir`:
+
+```bash
+cargo wasm-template
+cp target/wasm32-unknown-unknown/release-wasm/wql_wasm.wasm crates/wqlc/data/template.wasm
+```
+
 ## License
 
 See [LICENSE](LICENSE).
