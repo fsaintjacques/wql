@@ -62,7 +62,9 @@ impl WasmProgram {
             .len()
             .try_into()
             .map_err(|_| "input exceeds u32::MAX")?;
-        let out_ptr = in_ptr.checked_add(in_len).ok_or("output pointer overflow")?;
+        let out_ptr = in_ptr
+            .checked_add(in_len)
+            .ok_or("output pointer overflow")?;
         let out_len = (in_len as u64 * 2 + 256) as u32;
         let needed = (out_ptr as usize) + (out_len as usize);
 
