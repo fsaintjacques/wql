@@ -58,10 +58,13 @@ impl WasmProgram {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn eval(&mut self, input: &[u8]) -> Result<(WasmEvalResult, Vec<u8>), String> {
         let in_ptr = self.heap_base;
-        let in_len = input.len() as u32;
-        let out_ptr = in_ptr + in_len;
-        let out_len = in_len * 2 + 256;
-        let needed = (out_ptr + out_len) as usize;
+        let in_len: u32 = input
+            .len()
+            .try_into()
+            .map_err(|_| "input exceeds u32::MAX")?;
+        let out_ptr = in_ptr.checked_add(in_len).ok_or("output pointer overflow")?;
+        let out_len = (in_len as u64 * 2 + 256) as u32;
+        let needed = (out_ptr as usize) + (out_len as usize);
 
         // Grow memory if needed.
         let current = self.memory.data_size(&self.store);
@@ -81,12 +84,12 @@ impl WasmProgram {
             .call(&mut self.store, (in_ptr, in_len, out_ptr, out_len))
             .map_err(|e| format!("wasm eval: {e}"))?;
 
-        if result == -2 {
-            return Err("wasm wql_eval returned runtime error (-2)".into());
-        }
-
-        if result == -1 {
-            return Ok((WasmEvalResult { matched: false }, Vec::new()));
+        if result < 0 {
+            return match result {
+                -1 => Ok((WasmEvalResult { matched: false }, Vec::new())),
+                -2 => Err("wasm wql_eval returned runtime error (-2)".into()),
+                code => Err(format!("wasm wql_eval returned unexpected code ({code})")),
+            };
         }
 
         let output_len = result as usize;

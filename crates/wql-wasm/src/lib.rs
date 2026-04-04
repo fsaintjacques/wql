@@ -44,6 +44,7 @@ mod wasm {
     /// not specialize code paths based on the placeholder program.
     fn program_bytes() -> &'static [u8] {
         const HEADER_SIZE: usize = 14;
+        const MAX_PROGRAM: usize = SLOT_SIZE - PROGRAM_OFFSET;
         let slot = core::hint::black_box(&PROGRAM_SLOT);
         let base = PROGRAM_OFFSET;
         let bytecode_len = u32::from_le_bytes([
@@ -52,7 +53,9 @@ mod wasm {
             slot[base + 12],
             slot[base + 13],
         ]) as usize;
-        &slot[base..base + HEADER_SIZE + bytecode_len]
+        let total = HEADER_SIZE + bytecode_len;
+        assert!(total <= MAX_PROGRAM, "program exceeds slot capacity");
+        &slot[base..base + total]
     }
 
     /// Single-threaded lazy cell. Sound because WASM has no threads (guarded by
